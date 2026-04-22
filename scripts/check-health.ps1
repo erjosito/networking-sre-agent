@@ -10,17 +10,58 @@
     Resource group name (default: netsre-rg)
 .PARAMETER Prefix
     Resource naming prefix (default: netsre)
+.PARAMETER Sections
+    Comma-separated list of section numbers to run (e.g. 1,4,12).
+    If omitted, all sections are run.
+.PARAMETER ListSections
+    Print the list of available sections and exit.
 .EXAMPLE
     .\check-health.ps1
-    .\check-health.ps1 -ResourceGroup "my-rg" -Prefix "myprefix"
+    .\check-health.ps1 -Sections 1,4,12
+    .\check-health.ps1 -ListSections
+    .\check-health.ps1 -ResourceGroup "my-rg" -Prefix "myprefix" -Sections 8,10
 #>
 [CmdletBinding()]
 param(
     [string]$ResourceGroup = "netsre-rg",
-    [string]$Prefix = "netsre"
+    [string]$Prefix = "netsre",
+    [int[]]$Sections = @(),
+    [switch]$ListSections
 )
 
 $ErrorActionPreference = "Continue"
+
+# ─── Section catalog ─────────────────────────────────────────────────────────
+$SectionCatalog = [ordered]@{
+    1  = "NVA NIC IP Forwarding"
+    2  = "VNet Peerings"
+    3  = "VPN Connections"
+    4  = "Route Table Subnet Associations"
+    5  = "UDR Default Route Next Hops"
+    6  = "BGP Route Propagation"
+    7  = "NSG Blocking Rules"
+    8  = "NVA OS Configuration"
+    9  = "Application Gateway Backend Health"
+    10 = "NVA NAT / SNAT Configuration"
+    11 = "NVA Load Balancer Health Probe Status"
+    12 = "Connection Monitor Results"
+    13 = "NVA Subnet Default Outbound Access"
+    14 = "Application Endpoint HTTP Reachability"
+    16 = "Spoke VM Local Web Application"
+}
+
+if ($ListSections) {
+    Write-Host "Available health check sections:" -ForegroundColor Cyan
+    foreach ($kv in $SectionCatalog.GetEnumerator()) {
+        Write-Host ("  {0,2}. {1}" -f $kv.Key, $kv.Value)
+    }
+    Write-Host ""
+    Write-Host "Usage: .\check-health.ps1 -Sections 1,4,12" -ForegroundColor Gray
+    exit 0
+}
+
+$runAll = ($Sections.Count -eq 0)
+function ShouldRun([int]$n) { return $runAll -or ($Sections -contains $n) }
 
 # ─── Counters ────────────────────────────────────────────────────────────────
 $script:PassCount = 0
@@ -56,11 +97,15 @@ Write-Info "╔═════════════════════�
 Write-Info "║  HEALTH CHECK                                             ║"
 Write-Info "║  Resource Group: $ResourceGroup"
 Write-Info "║  Prefix:         $Prefix"
+if (-not $runAll) {
+    Write-Info "║  Sections:       $($Sections -join ', ')"
+}
 Write-Info "╚════════════════════════════════════════════════════════════╝"
 
 ###############################################################################
 # 1. IP Forwarding on NVA NICs
 ###############################################################################
+if (ShouldRun 1) {
 Write-Section "1. NVA NIC IP Forwarding"
 foreach ($hub in @("hub1", "hub2")) {
     $nic = "$Prefix-$hub-nva-nic"
@@ -75,10 +120,12 @@ foreach ($hub in @("hub1", "hub2")) {
         Write-CheckFail "$nic`: could not query NIC"
     }
 }
+} # end section 1
 
 ###############################################################################
 # 2. VNet Peerings
 ###############################################################################
+if (ShouldRun 2) {
 Write-Section "2. VNet Peerings"
 $peeringPairs = @(
     @{ Hub = "hub1"; Spoke = "spoke11"; PeerName = "$Prefix-hub1-vnet-to-spoke11" },
@@ -102,9 +149,12 @@ foreach ($pair in $peeringPairs) {
     }
 }
 
+} # end section 2
+
 ###############################################################################
 # 3. VPN Connections
 ###############################################################################
+if (ShouldRun 3) {
 Write-Section "3. VPN Connections"
 $vpnConns = @(
     "$Prefix-conn-hub1-to-onprem",
@@ -130,9 +180,12 @@ foreach ($conn in $vpnConns) {
     }
 }
 
+} # end section 3
+
 ###############################################################################
 # 4. Route Table Associations
 ###############################################################################
+if (ShouldRun 4) {
 Write-Section "4. Route Table Subnet Associations"
 $spokeRts = @(
     @{ Spoke = "spoke11"; Subnet = "default"; Rt = "$Prefix-spoke11-rt" },
@@ -202,9 +255,12 @@ foreach ($hub in @("hub1", "hub2")) {
     }
 }
 
+} # end section 4
+
 ###############################################################################
 # 5. UDR Default Route Next Hops
 ###############################################################################
+if (ShouldRun 5) {
 Write-Section "5. UDR Default Route Next Hops"
 foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
     $rt = "$Prefix-$spoke-rt"
@@ -225,9 +281,12 @@ foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
     }
 }
 
+} # end section 5
+
 ###############################################################################
 # 6. BGP Propagation
 ###############################################################################
+if (ShouldRun 6) {
 Write-Section "6. BGP Route Propagation (should be disabled on spoke RTs)"
 foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
     $rt = "$Prefix-$spoke-rt"
@@ -243,9 +302,12 @@ foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
     }
 }
 
+} # end section 6
+
 ###############################################################################
 # 7. NSG Fault-Injection Rules
 ###############################################################################
+if (ShouldRun 7) {
 Write-Section "7. NSG Blocking Rules (should not exist)"
 $faultRules = @("FaultInject-Block-ICMP", "FaultInject-Block-All-Inbound", "FaultInject-Block-All-Outbound", "FaultInject-Block-SSH")
 foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
@@ -273,9 +335,12 @@ try {
     Write-CheckWarn "Hub1 GatewaySubnet: could not check NSG"
 }
 
+} # end section 7
+
 ###############################################################################
 # 8. NVA OS Configuration (via run-command)
 ###############################################################################
+if (ShouldRun 8) {
 Write-Section "8. NVA OS Configuration (via run-command)"
 foreach ($hub in @("hub1", "hub2")) {
     $vm = "$Prefix-$hub-nva"
@@ -319,9 +384,12 @@ foreach ($hub in @("hub1", "hub2")) {
     }
 }
 
+} # end section 8
+
 ###############################################################################
 # 9. Application Gateway Backend Health
 ###############################################################################
+if (ShouldRun 9) {
 Write-Section "9. Application Gateway Backend Health"
 foreach ($hub in @("hub1", "hub2")) {
     $appGw = "$Prefix-$hub-appgw"
@@ -353,9 +421,12 @@ foreach ($hub in @("hub1", "hub2")) {
     }
 }
 
+} # end section 9
+
 ###############################################################################
 # 10. NVA NAT/SNAT Configuration (iptables nat table)
 ###############################################################################
+if (ShouldRun 10) {
 Write-Section "10. NVA NAT / SNAT Configuration"
 foreach ($hub in @("hub1", "hub2")) {
     $vm = "$Prefix-$hub-nva"
@@ -379,9 +450,12 @@ foreach ($hub in @("hub1", "hub2")) {
     }
 }
 
+} # end section 10
+
 ###############################################################################
 # 11. NVA Load Balancer Health Probe Status
 ###############################################################################
+if (ShouldRun 11) {
 Write-Section "11. NVA Load Balancer Health Probe Status"
 foreach ($hub in @("hub1", "hub2")) {
     $lb = "$Prefix-$hub-nva-lb"
@@ -423,9 +497,12 @@ foreach ($hub in @("hub1", "hub2")) {
     }
 }
 
+} # end section 11
+
 ###############################################################################
 # 12. Connection Monitor Results
 ###############################################################################
+if (ShouldRun 12) {
 Write-Section "12. Connection Monitor Results"
 $cmName = "$Prefix-connection-monitor"
 $cmLocation = az group show -n $ResourceGroup --query location -o tsv 2>$null
@@ -509,9 +586,12 @@ NWConnectionMonitorTestResult
     Write-CheckFail "Connection Monitor: could not query — $($_.Exception.Message)"
 }
 
+} # end section 12
+
 ###############################################################################
 # 13. NVA Subnet Default Outbound Access
 ###############################################################################
+if (ShouldRun 13) {
 Write-Section "13. NVA Subnet Default Outbound Access"
 foreach ($hub in @("hub1", "hub2")) {
     $vnetName = "$Prefix-$hub-vnet"
@@ -546,13 +626,17 @@ foreach ($hub in @("hub1", "hub2")) {
             }
 
             # Check default outbound access property
+            # With NAT Gateway present, defaultOutboundAccess=false is the desired state
+            $hasNatGw = ($subnet.natGateway -and $subnet.natGateway.id)
             $defaultOutbound = $subnet.defaultOutboundAccess
             if ($null -eq $defaultOutbound) {
                 Write-CheckWarn "$vnetName/NvaSubnet: defaultOutboundAccess property not set (depends on subscription default)"
+            } elseif ($defaultOutbound -eq $false -and $hasNatGw) {
+                Write-CheckPass "$vnetName/NvaSubnet: defaultOutboundAccess = false (correct — NAT Gateway provides outbound)"
+            } elseif ($defaultOutbound -eq $false -and -not $hasNatGw) {
+                Write-CheckFail "$vnetName/NvaSubnet: defaultOutboundAccess = false but NO NAT Gateway — NVAs cannot reach internet"
             } elseif ($defaultOutbound -eq $true) {
-                Write-CheckPass "$vnetName/NvaSubnet: defaultOutboundAccess = true"
-            } else {
-                Write-CheckFail "$vnetName/NvaSubnet: defaultOutboundAccess = false — NVAs cannot reach internet without NAT GW or PIP"
+                Write-CheckWarn "$vnetName/NvaSubnet: defaultOutboundAccess = true (consider setting to false with NAT Gateway)"
             }
         } else {
             Write-CheckWarn "$vnetName/NvaSubnet: could not query subnet"
@@ -562,9 +646,12 @@ foreach ($hub in @("hub1", "hub2")) {
     }
 }
 
+} # end section 13
+
 ###############################################################################
 # 14. Application Endpoint HTTP Reachability
 ###############################################################################
+if (ShouldRun 14) {
 Write-Section "14. Application Endpoint HTTP Reachability (AppGW + Traffic Manager)"
 # Resolve AppGW public FQDNs
 foreach ($hub in @("hub1", "hub2")) {
@@ -616,9 +703,12 @@ try {
     Write-CheckWarn "Traffic Manager: could not query profile $tmName"
 }
 
+} # end section 14
+
 ###############################################################################
 # 16. Spoke VM Local Web Application (via run-command)
 ###############################################################################
+if (ShouldRun 16) {
 Write-Section "16. Spoke VM Local Web Application (curl localhost via run-command)"
 foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
     $vmName = "$Prefix-$spoke-vm"
@@ -646,6 +736,8 @@ foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
         Write-CheckWarn "$vmName`: could not run command — $($_.Exception.Message)"
     }
 }
+
+} # end section 16
 
 ###############################################################################
 # Summary
