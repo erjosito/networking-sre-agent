@@ -1,0 +1,14 @@
+# Reference materials (copyrighted content, not for distribution)
+ref/
+
+# Node modules (used for PDF extraction tooling)
+node_modules/
+package.json
+package-lock.json
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Azure deployment outputs
+*.parameters.local.json

@@ -1,0 +1,32 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+  - traceroute
+  - net-tools
+  - inetutils-ping
+  - dnsutils
+  - nmap
+  - tcpdump
+  - iperf3
+  - apache2
+
+write_files:
+  - path: /var/www/html/index.html
+    permissions: '0644'
+    content: |
+      <!DOCTYPE html>
+      <html>
+      <head><title>Azure SRE Agent - Test App</title></head>
+      <body>
+        <h1>Hello from Azure SRE Agent Test Environment</h1>
+        <p><strong>Hostname:</strong> HOSTNAME_PLACEHOLDER</p>
+        <p><strong>Purpose:</strong> Networking SRE Agent fault injection testing</p>
+      </body>
+      </html>
+
+runcmd:
+  - hostnamectl set-hostname $(hostname) || true
+  - sed -i "s/HOSTNAME_PLACEHOLDER/$(hostname)/" /var/www/html/index.html
+  - systemctl enable apache2
+  - systemctl start apache2

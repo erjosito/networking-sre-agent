@@ -57,10 +57,10 @@ resource agentAppInsights 'Microsoft.Insights/components@2020-02-02' = {
 
 // ──────────────────────────────────────────────
 // SRE Agent (Microsoft.App/agents)
-// API: 2026-01-01 (GA)
+// API: 2025-05-01-preview (GA 2026-01-01 may not be available in all subscriptions)
 // Docs: https://learn.microsoft.com/azure/sre-agent/overview
 // ──────────────────────────────────────────────
-resource sreAgent 'Microsoft.App/agents@2026-01-01' = {
+resource sreAgent 'Microsoft.App/agents@2025-05-01-preview' = {
   name: '${prefix}-sre-agent'
   location: location
   identity: {

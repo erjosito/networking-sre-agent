@@ -544,6 +544,8 @@ NWConnectionMonitorTestResult
                 if ($null -eq $rows -or @($rows).Count -eq 0) {
                     Write-CheckWarn "Connection Monitor: no test results in the last 30 minutes (CM may still be collecting data)"
                 } else {
+                    $passCount = 0
+                    $failCount = 0
                     foreach ($row in @($rows)) {
                         # Rows may be objects with named properties or positional arrays
                         if ($row -is [array]) {
@@ -556,14 +558,23 @@ NWConnectionMonitorTestResult
                         }
                         $rttStr = if ($rtt) { "${rtt}ms" } else { "N/A" }
                         if ($result -eq "Pass" -or $result -eq "Passed") {
-                            Write-CheckPass "CM $tg ($src -> $dst): PASS (RTT: $rttStr)"
+                            $passCount++
                         } elseif ($result -eq "Fail" -or $result -eq "Failed") {
+                            $failCount++
                             Write-CheckFail "CM $tg ($src -> $dst): FAIL — $failed/$total checks failed (RTT: $rttStr)"
                         } elseif ($result -eq "Indeterminate") {
+                            $failCount++
                             Write-CheckWarn "CM $tg ($src -> $dst): Indeterminate (RTT: $rttStr)"
                         } else {
+                            $failCount++
                             Write-CheckWarn "CM $tg ($src -> $dst): $result (RTT: $rttStr)"
                         }
+                    }
+                    $totalTests = $passCount + $failCount
+                    if ($failCount -eq 0) {
+                        Write-CheckPass "All $totalTests Connection Monitor tests passed"
+                    } else {
+                        Write-Info "Summary: $failCount/$totalTests tests failed ($passCount passed — passing tests hidden)"
                     }
                 }
             } else {
