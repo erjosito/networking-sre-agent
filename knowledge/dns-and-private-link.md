@@ -371,7 +371,7 @@ az network private-endpoint dns-zone-group create \
                     │  Private DNS Zones (linked to Hub):   │
                     │    ├─ privatelink.blob.core.windows.net│
                     │    ├─ privatelink.database.windows.net │
-                    │    └─ privatelink.vaultcore.azure.net  │
+                    │    └─ privatelink.web.core.windows.net │
                     └──────────────┬────────────────────────┘
                                    │ VNet Peering
                     ┌──────────────┴────────────────────────┐

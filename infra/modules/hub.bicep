@@ -47,6 +47,9 @@ param appGwSubnetPrefix string
 @description('Routes for the NVA subnet (cross-hub spoke prefixes via remote NVA LB)')
 param nvaSubnetRoutes array = []
 
+@description('Private Endpoint subnet prefix (/24), empty to skip PE subnet')
+param privateEndpointSubnetPrefix string = ''
+
 // ──────────────────────────────────────────────
 // Variables
 // ──────────────────────────────────────────────
@@ -264,10 +267,26 @@ resource appGwRouteTable 'Microsoft.Network/routeTables@2024-01-01' = {
   properties: {
     disableBgpRoutePropagation: true
     routes: [
-      for route in spokeRoutes: {
-        name: route.name
+      {
+        name: 'rfc1918-10'
         properties: {
-          addressPrefix: route.addressPrefix
+          addressPrefix: '10.0.0.0/8'
+          nextHopType: 'VirtualAppliance'
+          nextHopIpAddress: nvaLbPrivateIp
+        }
+      }
+      {
+        name: 'rfc1918-172'
+        properties: {
+          addressPrefix: '172.16.0.0/12'
+          nextHopType: 'VirtualAppliance'
+          nextHopIpAddress: nvaLbPrivateIp
+        }
+      }
+      {
+        name: 'rfc1918-192'
+        properties: {
+          addressPrefix: '192.168.0.0/16'
           nextHopType: 'VirtualAppliance'
           nextHopIpAddress: nvaLbPrivateIp
         }
@@ -322,6 +341,52 @@ resource natGateway 'Microsoft.Network/natGateways@2024-01-01' = {
     publicIpAddresses: [
       {
         id: natGwPip.id
+      }
+    ]
+  }
+}
+
+// ──────────────────────────────────────────────
+// NSG for Private Endpoint Subnet
+// ──────────────────────────────────────────────
+resource peNsg 'Microsoft.Network/networkSecurityGroups@2024-01-01' = if (!empty(privateEndpointSubnetPrefix)) {
+  name: '${prefix}-${hubName}-pe-nsg'
+  location: location
+  properties: {
+    securityRules: [
+      {
+        name: 'AllowInternalInbound'
+        properties: {
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: '*'
+          sourcePortRange: '*'
+          destinationPortRange: '*'
+          sourceAddressPrefix: '10.0.0.0/8'
+          destinationAddressPrefix: '*'
+        }
+      }
+    ]
+  }
+}
+
+// ──────────────────────────────────────────────
+// Route Table for PE Subnet (return traffic via NVA)
+// ──────────────────────────────────────────────
+resource peRouteTable 'Microsoft.Network/routeTables@2024-01-01' = if (!empty(privateEndpointSubnetPrefix)) {
+  name: '${prefix}-${hubName}-pe-rt'
+  location: location
+  properties: {
+    disableBgpRoutePropagation: true
+    routes: [
+      for route in spokeRoutes: {
+        name: route.name
+        properties: {
+          addressPrefix: route.addressPrefix
+          nextHopType: 'VirtualAppliance'
+          nextHopIpAddress: nvaLbPrivateIp
+        }
       }
     ]
   }
@@ -387,7 +452,31 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
         }
       }
     ]
+    // PE subnet added conditionally after VNet creation to avoid circular deps
   }
+}
+
+// ──────────────────────────────────────────────
+// Private Endpoint Subnet (added separately to support conditional creation)
+// ──────────────────────────────────────────────
+resource peSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' = if (!empty(privateEndpointSubnetPrefix)) {
+  parent: vnet
+  name: 'PrivateEndpointSubnet'
+  properties: {
+    addressPrefix: privateEndpointSubnetPrefix
+    privateEndpointNetworkPolicies: 'Enabled'
+    networkSecurityGroup: {
+      id: peNsg.id
+    }
+    routeTable: {
+      id: peRouteTable.id
+    }
+  }
+  dependsOn: [
+    nvaNsg
+    defaultNsg
+    appGwNsg
+  ]
 }
 
 // ──────────────────────────────────────────────
@@ -617,3 +706,4 @@ output vpnGatewayId string = vpnGateway.id
 output vpnGatewayPublicIp string = vpnGwPip.properties.ipAddress
 output vpnGatewayBgpAddress string = vpnGateway.properties.bgpSettings.bgpPeeringAddress
 output appGwSubnetId string = vnet.properties.subnets[3].id
+output privateEndpointSubnetId string = !empty(privateEndpointSubnetPrefix) ? peSubnet.id : ''

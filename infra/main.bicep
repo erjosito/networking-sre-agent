@@ -50,9 +50,11 @@ module hub1 'modules/hub.bicep' = {
       { name: 'to-spoke21', addressPrefix: '10.21.0.0/16' }
       { name: 'to-spoke22', addressPrefix: '10.22.0.0/16' }
       { name: 'to-onprem', addressPrefix: '10.100.0.0/16' }
+      { name: 'to-pe-subnet', addressPrefix: '10.1.4.0/24' }
     ]
     nvaLbPrivateIp: '10.1.1.200'
     appGwSubnetPrefix: '10.1.3.0/24'
+    privateEndpointSubnetPrefix: '10.1.4.0/24'
     nvaSubnetRoutes: [
       { name: 'to-spoke21-via-hub2', addressPrefix: '10.21.0.0/16', nextHopIp: '10.2.1.200' }
       { name: 'to-spoke22-via-hub2', addressPrefix: '10.22.0.0/16', nextHopIp: '10.2.1.200' }
@@ -83,6 +85,7 @@ module hub2 'modules/hub.bicep' = {
       { name: 'to-spoke21', addressPrefix: '10.21.0.0/16' }
       { name: 'to-spoke22', addressPrefix: '10.22.0.0/16' }
       { name: 'to-onprem', addressPrefix: '10.100.0.0/16' }
+      { name: 'to-pe-subnet', addressPrefix: '10.1.4.0/24' }
     ]
     nvaLbPrivateIp: '10.2.1.200'
     appGwSubnetPrefix: '10.2.3.0/24'
@@ -140,12 +143,9 @@ module spoke11 'modules/spoke.bicep' = {
     adminPassword: adminPassword
     adminPublicKey: adminPublicKey
     additionalRoutes: [
-      { name: 'to-spoke12', addressPrefix: '10.12.0.0/16' }
-      { name: 'to-spoke21', addressPrefix: '10.21.0.0/16' }
-      { name: 'to-spoke22', addressPrefix: '10.22.0.0/16' }
-      { name: 'to-onprem', addressPrefix: '10.100.0.0/16' }
-      { name: 'to-hub2', addressPrefix: '10.2.0.0/16' }
+      { name: 'to-pe-subnet', addressPrefix: '10.1.4.0/24' }
     ]
+    dnsServers: [ hub1.outputs.nvaLbFrontendIp ]
   }
 }
 
@@ -164,12 +164,9 @@ module spoke12 'modules/spoke.bicep' = {
     adminPassword: adminPassword
     adminPublicKey: adminPublicKey
     additionalRoutes: [
-      { name: 'to-spoke11', addressPrefix: '10.11.0.0/16' }
-      { name: 'to-spoke21', addressPrefix: '10.21.0.0/16' }
-      { name: 'to-spoke22', addressPrefix: '10.22.0.0/16' }
-      { name: 'to-onprem', addressPrefix: '10.100.0.0/16' }
-      { name: 'to-hub2', addressPrefix: '10.2.0.0/16' }
+      { name: 'to-pe-subnet', addressPrefix: '10.1.4.0/24' }
     ]
+    dnsServers: [ hub1.outputs.nvaLbFrontendIp ]
   }
 }
 
@@ -191,12 +188,9 @@ module spoke21 'modules/spoke.bicep' = {
     adminPassword: adminPassword
     adminPublicKey: adminPublicKey
     additionalRoutes: [
-      { name: 'to-spoke22', addressPrefix: '10.22.0.0/16' }
-      { name: 'to-spoke11', addressPrefix: '10.11.0.0/16' }
-      { name: 'to-spoke12', addressPrefix: '10.12.0.0/16' }
-      { name: 'to-onprem', addressPrefix: '10.100.0.0/16' }
-      { name: 'to-hub1', addressPrefix: '10.1.0.0/16' }
+      { name: 'to-pe-subnet', addressPrefix: '10.1.4.0/24' }
     ]
+    dnsServers: [ hub2.outputs.nvaLbFrontendIp ]
   }
 }
 
@@ -215,12 +209,9 @@ module spoke22 'modules/spoke.bicep' = {
     adminPassword: adminPassword
     adminPublicKey: adminPublicKey
     additionalRoutes: [
-      { name: 'to-spoke21', addressPrefix: '10.21.0.0/16' }
-      { name: 'to-spoke11', addressPrefix: '10.11.0.0/16' }
-      { name: 'to-spoke12', addressPrefix: '10.12.0.0/16' }
-      { name: 'to-onprem', addressPrefix: '10.100.0.0/16' }
-      { name: 'to-hub1', addressPrefix: '10.1.0.0/16' }
+      { name: 'to-pe-subnet', addressPrefix: '10.1.4.0/24' }
     ]
+    dnsServers: [ hub2.outputs.nvaLbFrontendIp ]
   }
 }
 
@@ -239,6 +230,7 @@ module onprem 'modules/onprem.bicep' = {
     adminUsername: adminUsername
     adminPassword: adminPassword
     adminPublicKey: adminPublicKey
+    dnsServers: [hub1.outputs.nvaLbFrontendIp, hub2.outputs.nvaLbFrontendIp]
   }
 }
 
@@ -281,6 +273,22 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
 }
 
 // ──────────────────────────────────────────────
+// Private Link (Storage Account Static Website with Private Endpoint in Hub1)
+// ──────────────────────────────────────────────
+module privateLink 'modules/private-link.bicep' = {
+  name: 'private-link-deployment'
+  params: {
+    location: location
+    prefix: prefix
+    privateEndpointSubnetId: hub1.outputs.privateEndpointSubnetId
+    vnetLinks: [
+      { name: 'hub1', vnetId: hub1.outputs.vnetId }
+      { name: 'hub2', vnetId: hub2.outputs.vnetId }
+    ]
+  }
+}
+
+// ──────────────────────────────────────────────
 // Connection Monitors (deployed to NetworkWatcherRG where Network Watcher lives)
 // ──────────────────────────────────────────────
 module connectionMonitors 'modules/connection-monitors.bicep' = {
@@ -305,6 +313,7 @@ module connectionMonitors 'modules/connection-monitors.bicep' = {
     spoke22VmIp: spoke22.outputs.vmPrivateIp
     onpremVmIp: onprem.outputs.vmPrivateIp
     trafficManagerFqdn: trafficManager.outputs.trafficManagerFqdn
+    staticWebsiteFqdn: privateLink.outputs.staticWebsiteFqdn
     logAnalyticsWorkspaceId: logAnalytics.id
   }
   dependsOn: [

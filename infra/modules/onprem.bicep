@@ -29,6 +29,9 @@ param adminPassword string
 @description('SSH public key (preferred)')
 param adminPublicKey string
 
+@description('Custom DNS servers for VNet (NVA LB IPs)')
+param dnsServers array = []
+
 // ──────────────────────────────────────────────
 // Variables
 // ──────────────────────────────────────────────
@@ -88,6 +91,35 @@ resource nsg 'Microsoft.Network/networkSecurityGroups@2024-01-01' = {
 }
 
 // ──────────────────────────────────────────────
+// NAT Gateway for outbound internet (needed for CM to external endpoints)
+// ──────────────────────────────────────────────
+resource natGwPip 'Microsoft.Network/publicIPAddresses@2024-01-01' = {
+  name: '${prefix}-onprem-natgw-pip'
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  zones: ['1', '2', '3']
+  properties: {
+    publicIPAllocationMethod: 'Static'
+  }
+}
+
+resource natGw 'Microsoft.Network/natGateways@2024-01-01' = {
+  name: '${prefix}-onprem-natgw'
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    publicIpAddresses: [
+      { id: natGwPip.id }
+    ]
+    idleTimeoutInMinutes: 4
+  }
+}
+
+// ──────────────────────────────────────────────
 // Virtual Network
 // ──────────────────────────────────────────────
 resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
@@ -99,6 +131,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
         vnetAddressPrefix
       ]
     }
+    dhcpOptions: !empty(dnsServers) ? {
+      dnsServers: dnsServers
+    } : null
     subnets: [
       {
         name: 'GatewaySubnet'
@@ -112,6 +147,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
           addressPrefix: defaultSubnetPrefix
           networkSecurityGroup: {
             id: nsg.id
+          }
+          natGateway: {
+            id: natGw.id
           }
         }
       }

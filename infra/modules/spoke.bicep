@@ -38,6 +38,9 @@ param adminPublicKey string
 @description('Additional routes beyond default route (other spokes, on-prem, etc.)')
 param additionalRoutes array
 
+@description('Custom DNS server IPs for the spoke VNet (empty = Azure default)')
+param dnsServers array = []
+
 // ──────────────────────────────────────────────
 // Variables
 // ──────────────────────────────────────────────
@@ -140,6 +143,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
       addressPrefixes: [
         vnetAddressPrefix
       ]
+    }
+    dhcpOptions: empty(dnsServers) ? null : {
+      dnsServers: dnsServers
     }
     subnets: [
       {

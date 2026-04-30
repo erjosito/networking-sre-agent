@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "prefix": { "value": "netsre" },
+    "location": { "value": "eastus2" },
+    "privateEndpointSubnetId": {
+      "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-hub1-vnet/subnets/PrivateEndpointSubnet"
+    },
+    "vnetLinks": {
+      "value": [
+        { "name": "hub1", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-hub1-vnet" },
+        { "name": "hub2", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-hub2-vnet" },
+        { "name": "spoke11", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-spoke11-vnet" },
+        { "name": "spoke12", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-spoke12-vnet" },
+        { "name": "spoke21", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-spoke21-vnet" },
+        { "name": "spoke22", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-spoke22-vnet" },
+        { "name": "onprem", "vnetId": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Network/virtualNetworks/netsre-onprem-vnet" }
+      ]
+    }
+  }
+}

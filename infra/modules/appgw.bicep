@@ -75,11 +75,14 @@ resource appGw 'Microsoft.Network/applicationGateways@2024-01-01' = {
         properties: {
           protocol: 'Http'
           path: '/'
-          host: '127.0.0.1'
           interval: 30
-          timeout: 30
+          timeout: 60
           unhealthyThreshold: 3
           minServers: 0
+          pickHostNameFromBackendHttpSettings: true
+          match: {
+            statusCodes: [ '200-399' ]
+          }
         }
       }
     ]
@@ -90,7 +93,8 @@ resource appGw 'Microsoft.Network/applicationGateways@2024-01-01' = {
           port: 80
           protocol: 'Http'
           cookieBasedAffinity: 'Disabled'
-          requestTimeout: 30
+          requestTimeout: 60
+          pickHostNameFromBackendAddress: true
           probe: {
             id: resourceId('Microsoft.Network/applicationGateways/probes', appGwName, 'appgw-probe')
           }

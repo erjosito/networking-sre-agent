@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "4009778729668417873"
+      "templateHash": "13755741642658672977"
     }
   },
   "parameters": {
@@ -215,6 +215,9 @@
           "appGwSubnetPrefix": {
             "value": "10.1.3.0/24"
           },
+          "privateEndpointSubnetPrefix": {
+            "value": "10.1.4.0/24"
+          },
           "nvaSubnetRoutes": {
             "value": [
               {
@@ -237,7 +240,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "16623219713651099070"
+              "templateHash": "6654541433079822014"
             }
           },
           "parameters": {
@@ -331,10 +334,17 @@
               "metadata": {
                 "description": "Routes for the NVA subnet (cross-hub spoke prefixes via remote NVA LB)"
               }
+            },
+            "privateEndpointSubnetPrefix": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Private Endpoint subnet prefix (/24), empty to skip PE subnet"
+              }
             }
           },
           "variables": {
-            "$fxv#0": "#cloud-config\r\npackage_update: true\r\npackages:\r\n  - iptables\r\n  - iptables-persistent\r\nwrite_files:\r\n  - path: /etc/sysctl.d/99-ip-forward.conf\r\n    content: |\r\n      net.ipv4.ip_forward=1\r\n    owner: root:root\r\n    permissions: '0644'\r\nruncmd:\r\n  - sysctl -p /etc/sysctl.d/99-ip-forward.conf\r\n  - iptables -P FORWARD ACCEPT\r\n  # SNAT for outbound Internet traffic (non-RFC1918 destinations)\r\n  # Using ipset or a custom chain to match RFC1918 and skip SNAT for those\r\n  - iptables -t nat -N INTERNET_SNAT || true\r\n  - iptables -t nat -A INTERNET_SNAT -d 10.0.0.0/8 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 172.16.0.0/12 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 192.168.0.0/16 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -j MASQUERADE\r\n  - iptables -t nat -A POSTROUTING -j INTERNET_SNAT\r\n  - mkdir -p /etc/iptables\r\n  - iptables-save > /etc/iptables/rules.v4\r\n",
+            "$fxv#0": "#cloud-config\r\npackage_update: true\r\npackages:\r\n  - iptables\r\n  - iptables-persistent\r\n  - dnsmasq\r\nwrite_files:\r\n  - path: /etc/sysctl.d/99-ip-forward.conf\r\n    content: |\r\n      net.ipv4.ip_forward=1\r\n    owner: root:root\r\n    permissions: '0644'\r\n  - path: /etc/dnsmasq.d/azure-dns.conf\r\n    content: |\r\n      # Forward all DNS queries to Azure DNS\r\n      server=168.63.129.16\r\n      # Listen on all interfaces (spokes and on-prem use NVA as DNS)\r\n      listen-address=0.0.0.0\r\n      bind-interfaces\r\n      # Don't read /etc/resolv.conf (avoid loops)\r\n      no-resolv\r\n      # Cache DNS responses\r\n      cache-size=1000\r\n    owner: root:root\r\n    permissions: '0644'\r\nruncmd:\r\n  - sysctl -p /etc/sysctl.d/99-ip-forward.conf\r\n  # Stateful firewall: use connection tracking so asymmetric routing breaks traffic\r\n  - iptables -P FORWARD DROP\r\n  - iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\r\n  - iptables -A FORWARD -m conntrack --ctstate NEW -j ACCEPT\r\n  - iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP\r\n  # SNAT for outbound Internet traffic (non-RFC1918 destinations)\r\n  - iptables -t nat -N INTERNET_SNAT || true\r\n  - iptables -t nat -A INTERNET_SNAT -d 10.0.0.0/8 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 172.16.0.0/12 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 192.168.0.0/16 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -j MASQUERADE\r\n  - iptables -t nat -A POSTROUTING -j INTERNET_SNAT\r\n  - mkdir -p /etc/iptables\r\n  - iptables-save > /etc/iptables/rules.v4\r\n  # DNS proxy: disable systemd-resolved to free port 53, then start dnsmasq\r\n  - systemctl disable --now systemd-resolved || true\r\n  - rm -f /etc/resolv.conf\r\n  - echo \"nameserver 168.63.129.16\" > /etc/resolv.conf\r\n  - systemctl enable --now dnsmasq\r\n",
             "useSSHKey": "[not(empty(parameters('adminPublicKey')))]",
             "nvaVmName": "[format('{0}-{1}-nva', parameters('prefix'), parameters('hubName'))]",
             "nvaCloudInit": "[base64(variables('$fxv#0'))]"
@@ -542,21 +552,33 @@
               "name": "[format('{0}-{1}-appgw-rt', parameters('prefix'), parameters('hubName'))]",
               "location": "[parameters('location')]",
               "properties": {
-                "copy": [
+                "disableBgpRoutePropagation": true,
+                "routes": [
                   {
-                    "name": "routes",
-                    "count": "[length(parameters('spokeRoutes'))]",
-                    "input": {
-                      "name": "[parameters('spokeRoutes')[copyIndex('routes')].name]",
-                      "properties": {
-                        "addressPrefix": "[parameters('spokeRoutes')[copyIndex('routes')].addressPrefix]",
-                        "nextHopType": "VirtualAppliance",
-                        "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
-                      }
+                    "name": "rfc1918-10",
+                    "properties": {
+                      "addressPrefix": "10.0.0.0/8",
+                      "nextHopType": "VirtualAppliance",
+                      "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
+                    }
+                  },
+                  {
+                    "name": "rfc1918-172",
+                    "properties": {
+                      "addressPrefix": "172.16.0.0/12",
+                      "nextHopType": "VirtualAppliance",
+                      "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
+                    }
+                  },
+                  {
+                    "name": "rfc1918-192",
+                    "properties": {
+                      "addressPrefix": "192.168.0.0/16",
+                      "nextHopType": "VirtualAppliance",
+                      "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
                     }
                   }
-                ],
-                "disableBgpRoutePropagation": true
+                ]
               }
             },
             {
@@ -614,6 +636,54 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-{1}-natgw-pip', parameters('prefix'), parameters('hubName')))]"
               ]
+            },
+            {
+              "condition": "[not(empty(parameters('privateEndpointSubnetPrefix')))]",
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-{1}-pe-nsg', parameters('prefix'), parameters('hubName'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "AllowInternalInbound",
+                    "properties": {
+                      "priority": 100,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "*",
+                      "sourcePortRange": "*",
+                      "destinationPortRange": "*",
+                      "sourceAddressPrefix": "10.0.0.0/8",
+                      "destinationAddressPrefix": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "condition": "[not(empty(parameters('privateEndpointSubnetPrefix')))]",
+              "type": "Microsoft.Network/routeTables",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-{1}-pe-rt', parameters('prefix'), parameters('hubName'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "copy": [
+                  {
+                    "name": "routes",
+                    "count": "[length(parameters('spokeRoutes'))]",
+                    "input": {
+                      "name": "[parameters('spokeRoutes')[copyIndex('routes')].name]",
+                      "properties": {
+                        "addressPrefix": "[parameters('spokeRoutes')[copyIndex('routes')].addressPrefix]",
+                        "nextHopType": "VirtualAppliance",
+                        "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
+                      }
+                    }
+                  }
+                ],
+                "disableBgpRoutePropagation": true
+              }
             },
             {
               "type": "Microsoft.Network/virtualNetworks",
@@ -684,6 +754,30 @@
               ]
             },
             {
+              "condition": "[not(empty(parameters('privateEndpointSubnetPrefix')))]",
+              "type": "Microsoft.Network/virtualNetworks/subnets",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}/{1}', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName')), 'PrivateEndpointSubnet')]",
+              "properties": {
+                "addressPrefix": "[parameters('privateEndpointSubnetPrefix')]",
+                "privateEndpointNetworkPolicies": "Enabled",
+                "networkSecurityGroup": {
+                  "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-pe-nsg', parameters('prefix'), parameters('hubName')))]"
+                },
+                "routeTable": {
+                  "id": "[resourceId('Microsoft.Network/routeTables', format('{0}-{1}-pe-rt', parameters('prefix'), parameters('hubName')))]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-appgw-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-default-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-nva-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-pe-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/routeTables', format('{0}-{1}-pe-rt', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/virtualNetworks', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName')))]"
+              ]
+            },
+            {
               "type": "Microsoft.Network/networkInterfaces",
               "apiVersion": "2024-01-01",
               "name": "[format('{0}-nic', variables('nvaVmName'))]",
@@ -723,7 +817,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -929,6 +1023,10 @@
             "appGwSubnetId": {
               "type": "string",
               "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName'))), '2024-01-01').subnets[3].id]"
+            },
+            "privateEndpointSubnetId": {
+              "type": "string",
+              "value": "[if(not(empty(parameters('privateEndpointSubnetPrefix'))), resourceId('Microsoft.Network/virtualNetworks/subnets', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName')), 'PrivateEndpointSubnet'), '')]"
             }
           }
         }
@@ -1029,7 +1127,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "16623219713651099070"
+              "templateHash": "6654541433079822014"
             }
           },
           "parameters": {
@@ -1123,10 +1221,17 @@
               "metadata": {
                 "description": "Routes for the NVA subnet (cross-hub spoke prefixes via remote NVA LB)"
               }
+            },
+            "privateEndpointSubnetPrefix": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Private Endpoint subnet prefix (/24), empty to skip PE subnet"
+              }
             }
           },
           "variables": {
-            "$fxv#0": "#cloud-config\r\npackage_update: true\r\npackages:\r\n  - iptables\r\n  - iptables-persistent\r\nwrite_files:\r\n  - path: /etc/sysctl.d/99-ip-forward.conf\r\n    content: |\r\n      net.ipv4.ip_forward=1\r\n    owner: root:root\r\n    permissions: '0644'\r\nruncmd:\r\n  - sysctl -p /etc/sysctl.d/99-ip-forward.conf\r\n  - iptables -P FORWARD ACCEPT\r\n  # SNAT for outbound Internet traffic (non-RFC1918 destinations)\r\n  # Using ipset or a custom chain to match RFC1918 and skip SNAT for those\r\n  - iptables -t nat -N INTERNET_SNAT || true\r\n  - iptables -t nat -A INTERNET_SNAT -d 10.0.0.0/8 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 172.16.0.0/12 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 192.168.0.0/16 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -j MASQUERADE\r\n  - iptables -t nat -A POSTROUTING -j INTERNET_SNAT\r\n  - mkdir -p /etc/iptables\r\n  - iptables-save > /etc/iptables/rules.v4\r\n",
+            "$fxv#0": "#cloud-config\r\npackage_update: true\r\npackages:\r\n  - iptables\r\n  - iptables-persistent\r\n  - dnsmasq\r\nwrite_files:\r\n  - path: /etc/sysctl.d/99-ip-forward.conf\r\n    content: |\r\n      net.ipv4.ip_forward=1\r\n    owner: root:root\r\n    permissions: '0644'\r\n  - path: /etc/dnsmasq.d/azure-dns.conf\r\n    content: |\r\n      # Forward all DNS queries to Azure DNS\r\n      server=168.63.129.16\r\n      # Listen on all interfaces (spokes and on-prem use NVA as DNS)\r\n      listen-address=0.0.0.0\r\n      bind-interfaces\r\n      # Don't read /etc/resolv.conf (avoid loops)\r\n      no-resolv\r\n      # Cache DNS responses\r\n      cache-size=1000\r\n    owner: root:root\r\n    permissions: '0644'\r\nruncmd:\r\n  - sysctl -p /etc/sysctl.d/99-ip-forward.conf\r\n  # Stateful firewall: use connection tracking so asymmetric routing breaks traffic\r\n  - iptables -P FORWARD DROP\r\n  - iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\r\n  - iptables -A FORWARD -m conntrack --ctstate NEW -j ACCEPT\r\n  - iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP\r\n  # SNAT for outbound Internet traffic (non-RFC1918 destinations)\r\n  - iptables -t nat -N INTERNET_SNAT || true\r\n  - iptables -t nat -A INTERNET_SNAT -d 10.0.0.0/8 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 172.16.0.0/12 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -d 192.168.0.0/16 -j RETURN\r\n  - iptables -t nat -A INTERNET_SNAT -j MASQUERADE\r\n  - iptables -t nat -A POSTROUTING -j INTERNET_SNAT\r\n  - mkdir -p /etc/iptables\r\n  - iptables-save > /etc/iptables/rules.v4\r\n  # DNS proxy: disable systemd-resolved to free port 53, then start dnsmasq\r\n  - systemctl disable --now systemd-resolved || true\r\n  - rm -f /etc/resolv.conf\r\n  - echo \"nameserver 168.63.129.16\" > /etc/resolv.conf\r\n  - systemctl enable --now dnsmasq\r\n",
             "useSSHKey": "[not(empty(parameters('adminPublicKey')))]",
             "nvaVmName": "[format('{0}-{1}-nva', parameters('prefix'), parameters('hubName'))]",
             "nvaCloudInit": "[base64(variables('$fxv#0'))]"
@@ -1334,21 +1439,33 @@
               "name": "[format('{0}-{1}-appgw-rt', parameters('prefix'), parameters('hubName'))]",
               "location": "[parameters('location')]",
               "properties": {
-                "copy": [
+                "disableBgpRoutePropagation": true,
+                "routes": [
                   {
-                    "name": "routes",
-                    "count": "[length(parameters('spokeRoutes'))]",
-                    "input": {
-                      "name": "[parameters('spokeRoutes')[copyIndex('routes')].name]",
-                      "properties": {
-                        "addressPrefix": "[parameters('spokeRoutes')[copyIndex('routes')].addressPrefix]",
-                        "nextHopType": "VirtualAppliance",
-                        "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
-                      }
+                    "name": "rfc1918-10",
+                    "properties": {
+                      "addressPrefix": "10.0.0.0/8",
+                      "nextHopType": "VirtualAppliance",
+                      "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
+                    }
+                  },
+                  {
+                    "name": "rfc1918-172",
+                    "properties": {
+                      "addressPrefix": "172.16.0.0/12",
+                      "nextHopType": "VirtualAppliance",
+                      "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
+                    }
+                  },
+                  {
+                    "name": "rfc1918-192",
+                    "properties": {
+                      "addressPrefix": "192.168.0.0/16",
+                      "nextHopType": "VirtualAppliance",
+                      "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
                     }
                   }
-                ],
-                "disableBgpRoutePropagation": true
+                ]
               }
             },
             {
@@ -1406,6 +1523,54 @@
               "dependsOn": [
                 "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-{1}-natgw-pip', parameters('prefix'), parameters('hubName')))]"
               ]
+            },
+            {
+              "condition": "[not(empty(parameters('privateEndpointSubnetPrefix')))]",
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-{1}-pe-nsg', parameters('prefix'), parameters('hubName'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "AllowInternalInbound",
+                    "properties": {
+                      "priority": 100,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "*",
+                      "sourcePortRange": "*",
+                      "destinationPortRange": "*",
+                      "sourceAddressPrefix": "10.0.0.0/8",
+                      "destinationAddressPrefix": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "condition": "[not(empty(parameters('privateEndpointSubnetPrefix')))]",
+              "type": "Microsoft.Network/routeTables",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-{1}-pe-rt', parameters('prefix'), parameters('hubName'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "copy": [
+                  {
+                    "name": "routes",
+                    "count": "[length(parameters('spokeRoutes'))]",
+                    "input": {
+                      "name": "[parameters('spokeRoutes')[copyIndex('routes')].name]",
+                      "properties": {
+                        "addressPrefix": "[parameters('spokeRoutes')[copyIndex('routes')].addressPrefix]",
+                        "nextHopType": "VirtualAppliance",
+                        "nextHopIpAddress": "[parameters('nvaLbPrivateIp')]"
+                      }
+                    }
+                  }
+                ],
+                "disableBgpRoutePropagation": true
+              }
             },
             {
               "type": "Microsoft.Network/virtualNetworks",
@@ -1476,6 +1641,30 @@
               ]
             },
             {
+              "condition": "[not(empty(parameters('privateEndpointSubnetPrefix')))]",
+              "type": "Microsoft.Network/virtualNetworks/subnets",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}/{1}', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName')), 'PrivateEndpointSubnet')]",
+              "properties": {
+                "addressPrefix": "[parameters('privateEndpointSubnetPrefix')]",
+                "privateEndpointNetworkPolicies": "Enabled",
+                "networkSecurityGroup": {
+                  "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-pe-nsg', parameters('prefix'), parameters('hubName')))]"
+                },
+                "routeTable": {
+                  "id": "[resourceId('Microsoft.Network/routeTables', format('{0}-{1}-pe-rt', parameters('prefix'), parameters('hubName')))]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-appgw-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-default-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-nva-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-{1}-pe-nsg', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/routeTables', format('{0}-{1}-pe-rt', parameters('prefix'), parameters('hubName')))]",
+                "[resourceId('Microsoft.Network/virtualNetworks', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName')))]"
+              ]
+            },
+            {
               "type": "Microsoft.Network/networkInterfaces",
               "apiVersion": "2024-01-01",
               "name": "[format('{0}-nic', variables('nvaVmName'))]",
@@ -1515,7 +1704,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -1721,6 +1910,10 @@
             "appGwSubnetId": {
               "type": "string",
               "value": "[reference(resourceId('Microsoft.Network/virtualNetworks', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName'))), '2024-01-01').subnets[3].id]"
+            },
+            "privateEndpointSubnetId": {
+              "type": "string",
+              "value": "[if(not(empty(parameters('privateEndpointSubnetPrefix'))), resourceId('Microsoft.Network/virtualNetworks/subnets', format('{0}-{1}-vnet', parameters('prefix'), parameters('hubName')), 'PrivateEndpointSubnet'), '')]"
             }
           }
         }
@@ -1772,25 +1965,14 @@
           "additionalRoutes": {
             "value": [
               {
-                "name": "to-spoke12",
-                "addressPrefix": "10.12.0.0/16"
-              },
-              {
-                "name": "to-spoke21",
-                "addressPrefix": "10.21.0.0/16"
-              },
-              {
-                "name": "to-spoke22",
-                "addressPrefix": "10.22.0.0/16"
-              },
-              {
-                "name": "to-onprem",
-                "addressPrefix": "10.100.0.0/16"
-              },
-              {
-                "name": "to-hub2",
-                "addressPrefix": "10.2.0.0/16"
+                "name": "to-pe-subnet",
+                "addressPrefix": "10.1.4.0/24"
               }
+            ]
+          },
+          "dnsServers": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'hub1-deployment'), '2025-04-01').outputs.nvaLbFrontendIp.value]"
             ]
           }
         },
@@ -1801,7 +1983,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "12448382614987479598"
+              "templateHash": "1738563371210357584"
             }
           },
           "parameters": {
@@ -1875,6 +2057,13 @@
               "type": "array",
               "metadata": {
                 "description": "Additional routes beyond default route (other spokes, on-prem, etc.)"
+              }
+            },
+            "dnsServers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Custom DNS server IPs for the spoke VNet (empty = Azure default)"
               }
             }
           },
@@ -1979,6 +2168,7 @@
                     "[parameters('vnetAddressPrefix')]"
                   ]
                 },
+                "dhcpOptions": "[if(empty(parameters('dnsServers')), null(), createObject('dnsServers', parameters('dnsServers')))]",
                 "subnets": [
                   {
                     "name": "default",
@@ -2066,7 +2256,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -2192,25 +2382,14 @@
           "additionalRoutes": {
             "value": [
               {
-                "name": "to-spoke11",
-                "addressPrefix": "10.11.0.0/16"
-              },
-              {
-                "name": "to-spoke21",
-                "addressPrefix": "10.21.0.0/16"
-              },
-              {
-                "name": "to-spoke22",
-                "addressPrefix": "10.22.0.0/16"
-              },
-              {
-                "name": "to-onprem",
-                "addressPrefix": "10.100.0.0/16"
-              },
-              {
-                "name": "to-hub2",
-                "addressPrefix": "10.2.0.0/16"
+                "name": "to-pe-subnet",
+                "addressPrefix": "10.1.4.0/24"
               }
+            ]
+          },
+          "dnsServers": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'hub1-deployment'), '2025-04-01').outputs.nvaLbFrontendIp.value]"
             ]
           }
         },
@@ -2221,7 +2400,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "12448382614987479598"
+              "templateHash": "1738563371210357584"
             }
           },
           "parameters": {
@@ -2295,6 +2474,13 @@
               "type": "array",
               "metadata": {
                 "description": "Additional routes beyond default route (other spokes, on-prem, etc.)"
+              }
+            },
+            "dnsServers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Custom DNS server IPs for the spoke VNet (empty = Azure default)"
               }
             }
           },
@@ -2399,6 +2585,7 @@
                     "[parameters('vnetAddressPrefix')]"
                   ]
                 },
+                "dhcpOptions": "[if(empty(parameters('dnsServers')), null(), createObject('dnsServers', parameters('dnsServers')))]",
                 "subnets": [
                   {
                     "name": "default",
@@ -2486,7 +2673,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -2612,25 +2799,14 @@
           "additionalRoutes": {
             "value": [
               {
-                "name": "to-spoke22",
-                "addressPrefix": "10.22.0.0/16"
-              },
-              {
-                "name": "to-spoke11",
-                "addressPrefix": "10.11.0.0/16"
-              },
-              {
-                "name": "to-spoke12",
-                "addressPrefix": "10.12.0.0/16"
-              },
-              {
-                "name": "to-onprem",
-                "addressPrefix": "10.100.0.0/16"
-              },
-              {
-                "name": "to-hub1",
-                "addressPrefix": "10.1.0.0/16"
+                "name": "to-pe-subnet",
+                "addressPrefix": "10.1.4.0/24"
               }
+            ]
+          },
+          "dnsServers": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'hub2-deployment'), '2025-04-01').outputs.nvaLbFrontendIp.value]"
             ]
           }
         },
@@ -2641,7 +2817,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "12448382614987479598"
+              "templateHash": "1738563371210357584"
             }
           },
           "parameters": {
@@ -2715,6 +2891,13 @@
               "type": "array",
               "metadata": {
                 "description": "Additional routes beyond default route (other spokes, on-prem, etc.)"
+              }
+            },
+            "dnsServers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Custom DNS server IPs for the spoke VNet (empty = Azure default)"
               }
             }
           },
@@ -2819,6 +3002,7 @@
                     "[parameters('vnetAddressPrefix')]"
                   ]
                 },
+                "dhcpOptions": "[if(empty(parameters('dnsServers')), null(), createObject('dnsServers', parameters('dnsServers')))]",
                 "subnets": [
                   {
                     "name": "default",
@@ -2906,7 +3090,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -3032,25 +3216,14 @@
           "additionalRoutes": {
             "value": [
               {
-                "name": "to-spoke21",
-                "addressPrefix": "10.21.0.0/16"
-              },
-              {
-                "name": "to-spoke11",
-                "addressPrefix": "10.11.0.0/16"
-              },
-              {
-                "name": "to-spoke12",
-                "addressPrefix": "10.12.0.0/16"
-              },
-              {
-                "name": "to-onprem",
-                "addressPrefix": "10.100.0.0/16"
-              },
-              {
-                "name": "to-hub1",
-                "addressPrefix": "10.1.0.0/16"
+                "name": "to-pe-subnet",
+                "addressPrefix": "10.1.4.0/24"
               }
+            ]
+          },
+          "dnsServers": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'hub2-deployment'), '2025-04-01').outputs.nvaLbFrontendIp.value]"
             ]
           }
         },
@@ -3061,7 +3234,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "12448382614987479598"
+              "templateHash": "1738563371210357584"
             }
           },
           "parameters": {
@@ -3135,6 +3308,13 @@
               "type": "array",
               "metadata": {
                 "description": "Additional routes beyond default route (other spokes, on-prem, etc.)"
+              }
+            },
+            "dnsServers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Custom DNS server IPs for the spoke VNet (empty = Azure default)"
               }
             }
           },
@@ -3239,6 +3419,7 @@
                     "[parameters('vnetAddressPrefix')]"
                   ]
                 },
+                "dhcpOptions": "[if(empty(parameters('dnsServers')), null(), createObject('dnsServers', parameters('dnsServers')))]",
                 "subnets": [
                   {
                     "name": "default",
@@ -3326,7 +3507,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -3442,6 +3623,12 @@
           },
           "adminPublicKey": {
             "value": "[parameters('adminPublicKey')]"
+          },
+          "dnsServers": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'hub1-deployment'), '2025-04-01').outputs.nvaLbFrontendIp.value]",
+              "[reference(resourceId('Microsoft.Resources/deployments', 'hub2-deployment'), '2025-04-01').outputs.nvaLbFrontendIp.value]"
+            ]
           }
         },
         "template": {
@@ -3451,7 +3638,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "1205026781937471319"
+              "templateHash": "10836602157528878054"
             }
           },
           "parameters": {
@@ -3507,6 +3694,13 @@
               "type": "string",
               "metadata": {
                 "description": "SSH public key (preferred)"
+              }
+            },
+            "dnsServers": {
+              "type": "array",
+              "defaultValue": [],
+              "metadata": {
+                "description": "Custom DNS servers for VNet (NVA LB IPs)"
               }
             }
           },
@@ -3567,6 +3761,43 @@
               }
             },
             {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-onprem-natgw-pip', parameters('prefix'))]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "zones": [
+                "1",
+                "2",
+                "3"
+              ],
+              "properties": {
+                "publicIPAllocationMethod": "Static"
+              }
+            },
+            {
+              "type": "Microsoft.Network/natGateways",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-onprem-natgw', parameters('prefix'))]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "properties": {
+                "publicIpAddresses": [
+                  {
+                    "id": "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-onprem-natgw-pip', parameters('prefix')))]"
+                  }
+                ],
+                "idleTimeoutInMinutes": 4
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', format('{0}-onprem-natgw-pip', parameters('prefix')))]"
+              ]
+            },
+            {
               "type": "Microsoft.Network/virtualNetworks",
               "apiVersion": "2024-01-01",
               "name": "[format('{0}-onprem-vnet', parameters('prefix'))]",
@@ -3577,6 +3808,7 @@
                     "[parameters('vnetAddressPrefix')]"
                   ]
                 },
+                "dhcpOptions": "[if(not(empty(parameters('dnsServers'))), createObject('dnsServers', parameters('dnsServers')), null())]",
                 "subnets": [
                   {
                     "name": "GatewaySubnet",
@@ -3590,12 +3822,16 @@
                       "addressPrefix": "[parameters('defaultSubnetPrefix')]",
                       "networkSecurityGroup": {
                         "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-onprem-nsg', parameters('prefix')))]"
+                      },
+                      "natGateway": {
+                        "id": "[resourceId('Microsoft.Network/natGateways', format('{0}-onprem-natgw', parameters('prefix')))]"
                       }
                     }
                   }
                 ]
               },
               "dependsOn": [
+                "[resourceId('Microsoft.Network/natGateways', format('{0}-onprem-natgw', parameters('prefix')))]",
                 "[resourceId('Microsoft.Network/networkSecurityGroups', format('{0}-onprem-nsg', parameters('prefix')))]"
               ]
             },
@@ -3632,7 +3868,7 @@
               "location": "[parameters('location')]",
               "properties": {
                 "hardwareProfile": {
-                  "vmSize": "Standard_B1ms"
+                  "vmSize": "Standard_D2als_v7"
                 },
                 "storageProfile": {
                   "imageReference": {
@@ -3772,7 +4008,11 @@
             }
           }
         }
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'hub1-deployment')]",
+        "[resourceId('Microsoft.Resources/deployments', 'hub2-deployment')]"
+      ]
     },
     {
       "type": "Microsoft.Resources/deployments",
@@ -4065,6 +4305,241 @@
     {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
+      "name": "private-link-deployment",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "prefix": {
+            "value": "[parameters('prefix')]"
+          },
+          "privateEndpointSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'hub1-deployment'), '2025-04-01').outputs.privateEndpointSubnetId.value]"
+          },
+          "vnetLinks": {
+            "value": [
+              {
+                "name": "hub1",
+                "vnetId": "[reference(resourceId('Microsoft.Resources/deployments', 'hub1-deployment'), '2025-04-01').outputs.vnetId.value]"
+              },
+              {
+                "name": "hub2",
+                "vnetId": "[reference(resourceId('Microsoft.Resources/deployments', 'hub2-deployment'), '2025-04-01').outputs.vnetId.value]"
+              }
+            ]
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "3088811011411120571"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region"
+              }
+            },
+            "prefix": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource naming prefix"
+              }
+            },
+            "privateEndpointSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Private Endpoint subnet ID (must have privateEndpointNetworkPolicies enabled)"
+              }
+            },
+            "vnetLinks": {
+              "type": "array",
+              "metadata": {
+                "description": "VNet IDs to link to the Private DNS Zone (hub VNets only)"
+              }
+            }
+          },
+          "variables": {
+            "uniqueSuffix": "[uniqueString(resourceGroup().id, parameters('prefix'))]",
+            "saName": "[toLower(format('{0}web{1}', replace(parameters('prefix'), '-', ''), take(variables('uniqueSuffix'), 8)))]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-05-01",
+              "name": "[variables('saName')]",
+              "location": "[parameters('location')]",
+              "kind": "StorageV2",
+              "sku": {
+                "name": "Standard_LRS"
+              },
+              "properties": {
+                "accessTier": "Hot",
+                "supportsHttpsTrafficOnly": true,
+                "allowBlobPublicAccess": true,
+                "minimumTlsVersion": "TLS1_2"
+              }
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}-upload-identity', parameters('prefix'))]",
+              "location": "[parameters('location')]"
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))), 'StorageBlobDataContributor')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Resources/deploymentScripts",
+              "apiVersion": "2023-08-01",
+              "name": "[format('{0}-upload-index-html', parameters('prefix'))]",
+              "location": "[parameters('location')]",
+              "kind": "AzureCLI",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))))]": {}
+                }
+              },
+              "properties": {
+                "azCliVersion": "2.52.0",
+                "retentionInterval": "PT1H",
+                "timeout": "PT5M",
+                "scriptContent": "      echo '<html><head><title>SRE Health Probe</title></head><body><h1>OK</h1><p>Private Endpoint connectivity verified.</p></body></html>' > index.html\r\n      az storage blob service-properties update --account-name $1 --static-website --index-document index.html --404-document index.html --auth-mode login\r\n      az storage blob upload --account-name $1 --container-name '$web' --name index.html --file index.html --overwrite --auth-mode login\r\n    ",
+                "arguments": "[variables('saName')]"
+              },
+              "dependsOn": [
+                "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))), 'StorageBlobDataContributor'))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2024-06-01",
+              "name": "privatelink.web.core.windows.net",
+              "location": "global"
+            },
+            {
+              "copy": {
+                "name": "dnsVnetLinks",
+                "count": "[length(parameters('vnetLinks'))]",
+                "mode": "serial",
+                "batchSize": 1
+              },
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2024-06-01",
+              "name": "[format('{0}/{1}', 'privatelink.web.core.windows.net', format('{0}-link', parameters('vnetLinks')[copyIndex()].name))]",
+              "location": "global",
+              "properties": {
+                "virtualNetwork": {
+                  "id": "[parameters('vnetLinks')[copyIndex()].vnetId]"
+                },
+                "registrationEnabled": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.web.core.windows.net')]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}-hub1-web-pe', parameters('prefix'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "subnet": {
+                  "id": "[parameters('privateEndpointSubnetId')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "[format('{0}-web-connection', parameters('prefix'))]",
+                    "properties": {
+                      "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]",
+                      "groupIds": [
+                        "web"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2024-01-01",
+              "name": "[format('{0}/{1}', format('{0}-hub1-web-pe', parameters('prefix')), 'default')]",
+              "properties": {
+                "privateDnsZoneConfigs": [
+                  {
+                    "name": "privatelink-web-core-windows-net",
+                    "properties": {
+                      "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.web.core.windows.net')]"
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.web.core.windows.net')]",
+                "[resourceId('Microsoft.Network/privateEndpoints', format('{0}-hub1-web-pe', parameters('prefix')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "storageAccountName": {
+              "type": "string",
+              "value": "[variables('saName')]"
+            },
+            "staticWebsiteFqdn": {
+              "type": "string",
+              "value": "[replace(replace(reference(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), '2023-05-01').primaryEndpoints.web, 'https://', ''), '/', '')]"
+            },
+            "privateEndpointName": {
+              "type": "string",
+              "value": "[format('{0}-hub1-web-pe', parameters('prefix'))]"
+            },
+            "privateEndpointId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateEndpoints', format('{0}-hub1-web-pe', parameters('prefix')))]"
+            },
+            "privateDnsZoneName": {
+              "type": "string",
+              "value": "privatelink.web.core.windows.net"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'hub1-deployment')]",
+        "[resourceId('Microsoft.Resources/deployments', 'hub2-deployment')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
       "name": "connection-monitors-deployment",
       "resourceGroup": "NetworkWatcherRG",
       "properties": {
@@ -4127,6 +4602,9 @@
           "trafficManagerFqdn": {
             "value": "[reference(resourceId('Microsoft.Resources/deployments', 'traffic-manager-deployment'), '2025-04-01').outputs.trafficManagerFqdn.value]"
           },
+          "staticWebsiteFqdn": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'private-link-deployment'), '2025-04-01').outputs.staticWebsiteFqdn.value]"
+          },
           "logAnalyticsWorkspaceId": {
             "value": "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-law', parameters('prefix')))]"
           }
@@ -4138,7 +4616,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "871300141918488757"
+              "templateHash": "7973794184976364827"
             }
           },
           "parameters": {
@@ -4206,6 +4684,13 @@
                 "description": "Traffic Manager FQDN for HTTP reachability test"
               }
             },
+            "staticWebsiteFqdn": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Storage Account static website FQDN for Private Endpoint HTTP probe"
+              }
+            },
             "logAnalyticsWorkspaceId": {
               "type": "string",
               "metadata": {
@@ -4220,7 +4705,7 @@
               "name": "[format('{0}/{1}', format('NetworkWatcher_{0}', parameters('location')), format('{0}-connection-monitor', parameters('prefix')))]",
               "location": "[parameters('location')]",
               "properties": {
-                "endpoints": "[flatten(createArray(createArray(createObject('name', parameters('spoke11VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke11VmId'), 'address', parameters('spoke11VmIp')), createObject('name', parameters('spoke12VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke12VmId'), 'address', parameters('spoke12VmIp')), createObject('name', parameters('spoke21VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke21VmId'), 'address', parameters('spoke21VmIp')), createObject('name', parameters('spoke22VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke22VmId'), 'address', parameters('spoke22VmIp')), createObject('name', parameters('onpremVmName'), 'type', 'AzureVM', 'resourceId', parameters('onpremVmId'), 'address', parameters('onpremVmIp'))), if(empty(parameters('trafficManagerFqdn')), createArray(), createArray(createObject('name', 'webapp-tm', 'type', 'ExternalAddress', 'address', parameters('trafficManagerFqdn')))), createArray(createObject('name', 'ifconfig-me', 'type', 'ExternalAddress', 'address', 'ifconfig.me'))))]",
+                "endpoints": "[flatten(createArray(createArray(createObject('name', parameters('spoke11VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke11VmId'), 'address', parameters('spoke11VmIp')), createObject('name', parameters('spoke12VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke12VmId'), 'address', parameters('spoke12VmIp')), createObject('name', parameters('spoke21VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke21VmId'), 'address', parameters('spoke21VmIp')), createObject('name', parameters('spoke22VmName'), 'type', 'AzureVM', 'resourceId', parameters('spoke22VmId'), 'address', parameters('spoke22VmIp')), createObject('name', parameters('onpremVmName'), 'type', 'AzureVM', 'resourceId', parameters('onpremVmId'), 'address', parameters('onpremVmIp'))), if(empty(parameters('trafficManagerFqdn')), createArray(), createArray(createObject('name', 'webapp-tm', 'type', 'ExternalAddress', 'address', parameters('trafficManagerFqdn')))), createArray(createObject('name', 'ifconfig-me', 'type', 'ExternalAddress', 'address', 'ifconfig.me')), if(empty(parameters('staticWebsiteFqdn')), createArray(), createArray(createObject('name', 'staticweb-pe', 'type', 'ExternalAddress', 'address', parameters('staticWebsiteFqdn'))))))]",
                 "testConfigurations": [
                   {
                     "name": "icmp-test",
@@ -4261,9 +4746,27 @@
                       "checksFailedPercent": 50,
                       "roundTripTimeMs": 500
                     }
+                  },
+                  {
+                    "name": "http-pe-test",
+                    "testFrequencySec": 60,
+                    "protocol": "Http",
+                    "httpConfiguration": {
+                      "port": 443,
+                      "method": "Get",
+                      "path": "/",
+                      "validStatusCodeRanges": [
+                        "200"
+                      ],
+                      "preferHTTPS": true
+                    },
+                    "successThreshold": {
+                      "checksFailedPercent": 50,
+                      "roundTripTimeMs": 500
+                    }
                   }
                 ],
-                "testGroups": "[flatten(createArray(createArray(createObject('name', 'spoke11-to-spoke12', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray(parameters('spoke12VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false()), createObject('name', 'spoke11-to-spoke21', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray(parameters('spoke21VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false()), createObject('name', 'spoke11-to-onprem', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray(parameters('onpremVmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false()), createObject('name', 'spoke21-to-spoke22', 'sources', createArray(parameters('spoke21VmName')), 'destinations', createArray(parameters('spoke22VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false()), createObject('name', 'spoke21-to-spoke11', 'sources', createArray(parameters('spoke21VmName')), 'destinations', createArray(parameters('spoke11VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false()), createObject('name', 'spoke22-to-onprem', 'sources', createArray(parameters('spoke22VmName')), 'destinations', createArray(parameters('onpremVmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false())), if(empty(parameters('trafficManagerFqdn')), createArray(), createArray(createObject('name', 'onprem-to-webapp', 'sources', createArray(parameters('onpremVmName')), 'destinations', createArray('webapp-tm'), 'testConfigurations', createArray('http-web-test'), 'disable', false()))), createArray(createObject('name', 'spokes-to-internet', 'sources', createArray(parameters('spoke11VmName'), parameters('spoke12VmName'), parameters('spoke21VmName'), parameters('spoke22VmName')), 'destinations', createArray('ifconfig-me'), 'testConfigurations', createArray('http-web-test'), 'disable', false()))))]",
+                "testGroups": "[flatten(createArray(createArray(createObject('name', 'spoke11-to-spoke12', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray(parameters('spoke12VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test', 'http-web-test'), 'disable', false()), createObject('name', 'spoke11-to-spoke21', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray(parameters('spoke21VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test', 'http-web-test'), 'disable', false()), createObject('name', 'spoke11-to-onprem', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray(parameters('onpremVmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false()), createObject('name', 'spoke21-to-spoke22', 'sources', createArray(parameters('spoke21VmName')), 'destinations', createArray(parameters('spoke22VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test', 'http-web-test'), 'disable', false()), createObject('name', 'spoke21-to-spoke11', 'sources', createArray(parameters('spoke21VmName')), 'destinations', createArray(parameters('spoke11VmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test', 'http-web-test'), 'disable', false()), createObject('name', 'spoke22-to-onprem', 'sources', createArray(parameters('spoke22VmName')), 'destinations', createArray(parameters('onpremVmName')), 'testConfigurations', createArray('icmp-test', 'tcp-ssh-test'), 'disable', false())), if(empty(parameters('trafficManagerFqdn')), createArray(), createArray(createObject('name', 'onprem-to-webapp', 'sources', createArray(parameters('onpremVmName')), 'destinations', createArray('webapp-tm'), 'testConfigurations', createArray('http-web-test'), 'disable', false()))), createArray(createObject('name', 'spokes-to-internet', 'sources', createArray(parameters('spoke11VmName'), parameters('spoke12VmName'), parameters('spoke21VmName'), parameters('spoke22VmName')), 'destinations', createArray('ifconfig-me'), 'testConfigurations', createArray('http-web-test'), 'disable', false())), if(empty(parameters('staticWebsiteFqdn')), createArray(), createArray(createObject('name', 'spoke11-to-staticweb', 'sources', createArray(parameters('spoke11VmName')), 'destinations', createArray('staticweb-pe'), 'testConfigurations', createArray('http-pe-test'), 'disable', false()), createObject('name', 'spoke21-to-staticweb', 'sources', createArray(parameters('spoke21VmName')), 'destinations', createArray('staticweb-pe'), 'testConfigurations', createArray('http-pe-test'), 'disable', false()), createObject('name', 'onprem-to-staticweb', 'sources', createArray(parameters('onpremVmName')), 'destinations', createArray('staticweb-pe'), 'testConfigurations', createArray('http-pe-test'), 'disable', false())))))]",
                 "outputs": [
                   {
                     "type": "Workspace",
@@ -4286,6 +4789,7 @@
       "dependsOn": [
         "[resourceId('Microsoft.OperationalInsights/workspaces', format('{0}-law', parameters('prefix')))]",
         "[resourceId('Microsoft.Resources/deployments', 'onprem-deployment')]",
+        "[resourceId('Microsoft.Resources/deployments', 'private-link-deployment')]",
         "[resourceId('Microsoft.Resources/deployments', 'spoke11-deployment')]",
         "[resourceId('Microsoft.Resources/deployments', 'spoke12-deployment')]",
         "[resourceId('Microsoft.Resources/deployments', 'spoke21-deployment')]",
@@ -4321,7 +4825,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "17284687327124823770"
+              "templateHash": "7027891297896547637"
             }
           },
           "parameters": {
@@ -4365,13 +4869,13 @@
             {
               "type": "Microsoft.Insights/metricAlerts",
               "apiVersion": "2018-03-01",
-              "name": "[format('{0}-conn-monitor-checks-failed', parameters('prefix'))]",
+              "name": "[format('{0}-cm-checks-failed', parameters('prefix'))]",
               "location": "global",
               "properties": {
-                "description": "Alert when Connection Monitor checks failed percentage exceeds 50%",
+                "description": "Connection Monitor: more than 20% of probes are failing (sustained over 5 min)",
                 "severity": 2,
                 "enabled": true,
-                "evaluationFrequency": "PT1M",
+                "evaluationFrequency": "PT5M",
                 "windowSize": "PT5M",
                 "scopes": [
                   "[parameters('connectionMonitorId')]"
@@ -4384,7 +4888,83 @@
                       "metricName": "ChecksFailedPercent",
                       "metricNamespace": "Microsoft.Network/networkWatchers/connectionMonitors",
                       "operator": "GreaterThan",
-                      "threshold": 50,
+                      "threshold": 20,
+                      "timeAggregation": "Average",
+                      "criterionType": "StaticThresholdCriterion"
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', format('{0}-netops-ag', parameters('prefix')))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('{0}-netops-ag', parameters('prefix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "[format('{0}-cm-test-result-fail', parameters('prefix'))]",
+              "location": "global",
+              "properties": {
+                "description": "Connection Monitor: one or more tests report unreachable destination sustained over 5 min (TestResult=Fail)",
+                "severity": 1,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT5M",
+                "scopes": [
+                  "[parameters('connectionMonitorId')]"
+                ],
+                "criteria": {
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                  "allOf": [
+                    {
+                      "name": "TestResultFail",
+                      "metricName": "TestResult",
+                      "metricNamespace": "Microsoft.Network/networkWatchers/connectionMonitors",
+                      "operator": "GreaterThanOrEqual",
+                      "threshold": 3,
+                      "timeAggregation": "Minimum",
+                      "criterionType": "StaticThresholdCriterion"
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "actionGroupId": "[resourceId('Microsoft.Insights/actionGroups', format('{0}-netops-ag', parameters('prefix')))]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/actionGroups', format('{0}-netops-ag', parameters('prefix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/metricAlerts",
+              "apiVersion": "2018-03-01",
+              "name": "[format('{0}-cm-high-latency', parameters('prefix'))]",
+              "location": "global",
+              "properties": {
+                "description": "Connection Monitor: average round-trip time exceeds 1000ms (informational — VPN paths have higher latency)",
+                "severity": 4,
+                "enabled": true,
+                "evaluationFrequency": "PT5M",
+                "windowSize": "PT15M",
+                "scopes": [
+                  "[parameters('connectionMonitorId')]"
+                ],
+                "criteria": {
+                  "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria",
+                  "allOf": [
+                    {
+                      "name": "HighLatency",
+                      "metricName": "RoundTripTimeMs",
+                      "metricNamespace": "Microsoft.Network/networkWatchers/connectionMonitors",
+                      "operator": "GreaterThan",
+                      "threshold": 1000,
                       "timeAggregation": "Average",
                       "criterionType": "StaticThresholdCriterion"
                     }
@@ -4406,9 +4986,17 @@
               "type": "string",
               "value": "[resourceId('Microsoft.Insights/actionGroups', format('{0}-netops-ag', parameters('prefix')))]"
             },
-            "alertRuleId": {
+            "checksFailedAlertId": {
               "type": "string",
-              "value": "[resourceId('Microsoft.Insights/metricAlerts', format('{0}-conn-monitor-checks-failed', parameters('prefix')))]"
+              "value": "[resourceId('Microsoft.Insights/metricAlerts', format('{0}-cm-checks-failed', parameters('prefix')))]"
+            },
+            "testResultAlertId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/metricAlerts', format('{0}-cm-test-result-fail', parameters('prefix')))]"
+            },
+            "latencyAlertId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Insights/metricAlerts', format('{0}-cm-high-latency', parameters('prefix')))]"
             }
           }
         }
@@ -4453,7 +5041,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "73160322010620019"
+              "templateHash": "13157252289824679502"
             }
           },
           "parameters": {
@@ -4475,7 +5063,8 @@
           },
           "variables": {
             "appGwName": "[format('{0}-{1}-appgw', parameters('prefix'), parameters('hubName'))]",
-            "pipName": "[format('{0}-{1}-appgw-pip', parameters('prefix'), parameters('hubName'))]"
+            "pipName": "[format('{0}-{1}-appgw-pip', parameters('prefix'), parameters('hubName'))]",
+            "dnsSuffix": "[substring(uniqueString(resourceGroup().id), 0, 6)]"
           },
           "resources": [
             {
@@ -4489,7 +5078,7 @@
               "properties": {
                 "publicIPAllocationMethod": "Static",
                 "dnsSettings": {
-                  "domainNameLabel": "[format('{0}-{1}-appgw', parameters('prefix'), parameters('hubName'))]"
+                  "domainNameLabel": "[format('{0}-{1}-appgw-{2}', parameters('prefix'), parameters('hubName'), variables('dnsSuffix'))]"
                 }
               }
             },
@@ -4554,11 +5143,16 @@
                     "properties": {
                       "protocol": "Http",
                       "path": "/",
-                      "host": "127.0.0.1",
                       "interval": 30,
-                      "timeout": 30,
+                      "timeout": 60,
                       "unhealthyThreshold": 3,
-                      "minServers": 0
+                      "minServers": 0,
+                      "pickHostNameFromBackendHttpSettings": true,
+                      "match": {
+                        "statusCodes": [
+                          "200-399"
+                        ]
+                      }
                     }
                   }
                 ],
@@ -4569,7 +5163,8 @@
                       "port": 80,
                       "protocol": "Http",
                       "cookieBasedAffinity": "Disabled",
-                      "requestTimeout": 30,
+                      "requestTimeout": 60,
+                      "pickHostNameFromBackendAddress": true,
                       "probe": {
                         "id": "[resourceId('Microsoft.Network/applicationGateways/probes', variables('appGwName'), 'appgw-probe')]"
                       }
@@ -4676,7 +5271,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "73160322010620019"
+              "templateHash": "13157252289824679502"
             }
           },
           "parameters": {
@@ -4698,7 +5293,8 @@
           },
           "variables": {
             "appGwName": "[format('{0}-{1}-appgw', parameters('prefix'), parameters('hubName'))]",
-            "pipName": "[format('{0}-{1}-appgw-pip', parameters('prefix'), parameters('hubName'))]"
+            "pipName": "[format('{0}-{1}-appgw-pip', parameters('prefix'), parameters('hubName'))]",
+            "dnsSuffix": "[substring(uniqueString(resourceGroup().id), 0, 6)]"
           },
           "resources": [
             {
@@ -4712,7 +5308,7 @@
               "properties": {
                 "publicIPAllocationMethod": "Static",
                 "dnsSettings": {
-                  "domainNameLabel": "[format('{0}-{1}-appgw', parameters('prefix'), parameters('hubName'))]"
+                  "domainNameLabel": "[format('{0}-{1}-appgw-{2}', parameters('prefix'), parameters('hubName'), variables('dnsSuffix'))]"
                 }
               }
             },
@@ -4777,11 +5373,16 @@
                     "properties": {
                       "protocol": "Http",
                       "path": "/",
-                      "host": "127.0.0.1",
                       "interval": 30,
-                      "timeout": 30,
+                      "timeout": 60,
                       "unhealthyThreshold": 3,
-                      "minServers": 0
+                      "minServers": 0,
+                      "pickHostNameFromBackendHttpSettings": true,
+                      "match": {
+                        "statusCodes": [
+                          "200-399"
+                        ]
+                      }
                     }
                   }
                 ],
@@ -4792,7 +5393,8 @@
                       "port": 80,
                       "protocol": "Http",
                       "cookieBasedAffinity": "Disabled",
-                      "requestTimeout": 30,
+                      "requestTimeout": 60,
+                      "pickHostNameFromBackendAddress": true,
                       "probe": {
                         "id": "[resourceId('Microsoft.Network/applicationGateways/probes', variables('appGwName'), 'appgw-probe')]"
                       }
@@ -4890,7 +5492,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "15490465950560069102"
+              "templateHash": "5313221594984502401"
             }
           },
           "parameters": {
@@ -4904,6 +5506,9 @@
               "type": "string"
             }
           },
+          "variables": {
+            "dnsSuffix": "[substring(uniqueString(resourceGroup().id), 0, 6)]"
+          },
           "resources": [
             {
               "type": "Microsoft.Network/trafficmanagerprofiles",
@@ -4914,7 +5519,7 @@
                 "profileStatus": "Enabled",
                 "trafficRoutingMethod": "Performance",
                 "dnsConfig": {
-                  "relativeName": "[format('{0}-webapp', parameters('prefix'))]",
+                  "relativeName": "[format('{0}-webapp-{1}', parameters('prefix'), variables('dnsSuffix'))]",
                   "ttl": 30
                 },
                 "monitorConfig": {
@@ -5015,7 +5620,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "1436920809985654027"
+              "templateHash": "15350627609519539265"
             }
           },
           "parameters": {
@@ -5113,7 +5718,7 @@
             },
             {
               "type": "Microsoft.App/agents",
-              "apiVersion": "2026-01-01",
+              "apiVersion": "2025-05-01-preview",
               "name": "[format('{0}-sre-agent', parameters('prefix'))]",
               "location": "[parameters('location')]",
               "identity": {

@@ -47,7 +47,12 @@ $SectionCatalog = [ordered]@{
     12 = "Connection Monitor Results"
     13 = "NVA Subnet Default Outbound Access"
     14 = "Application Endpoint HTTP Reachability"
+    15 = "Application Gateway Probe Configuration"
     16 = "Spoke VM Local Web Application"
+    17 = "Private Endpoint Configuration"
+    18 = "Private DNS Zone"
+    19 = "dnsmasq on NVAs"
+    20 = "Static Website DNS Resolution and VNet DNS Config"
 }
 
 if ($ListSections) {
@@ -717,6 +722,63 @@ try {
 } # end section 14
 
 ###############################################################################
+# 15. Application Gateway Probe Configuration
+###############################################################################
+if (ShouldRun 15) {
+Write-Section "15. Application Gateway Probe Configuration"
+
+foreach ($hub in @("hub1", "hub2")) {
+    $appgwName = "$Prefix-$hub-appgw"
+    try {
+        $probeJson = az network application-gateway probe show -g $ResourceGroup --gateway-name $appgwName -n "backend-probe" -o json 2>$null
+        if ($probeJson) {
+            $probe = $probeJson | ConvertFrom-Json
+            $probeHost = $probe.host
+            $pickHost = $probe.pickHostNameFromBackendHttpSettings
+
+            if ($pickHost -eq $true) {
+                Write-CheckPass "$appgwName probe: pickHostNameFromBackendHttpSettings = true"
+            } elseif ([string]::IsNullOrEmpty($probeHost) -or $probeHost -eq "") {
+                Write-CheckWarn "$appgwName probe: host is empty and pickHostName is false — probe may fail"
+            } elseif ($probeHost -eq "127.0.0.1") {
+                Write-CheckFail "$appgwName probe: host is 127.0.0.1 — backends will appear Unhealthy"
+            } else {
+                Write-CheckWarn "$appgwName probe: custom host '$probeHost' — verify this resolves to backend"
+            }
+
+            # Check timeout
+            $timeout = $probe.timeout
+            if ($timeout -lt 30) {
+                Write-CheckWarn "$appgwName probe: timeout is ${timeout}s (may be too short for NVA-routed traffic)"
+            } else {
+                Write-CheckPass "$appgwName probe: timeout ${timeout}s"
+            }
+        } else {
+            Write-CheckWarn "${appgwName}: probe 'backend-probe' not found"
+        }
+    } catch {
+        Write-CheckWarn "${appgwName}: could not query probe — $($_.Exception.Message)"
+    }
+
+    # Check backend HTTP settings
+    try {
+        $httpJson = az network application-gateway http-settings show -g $ResourceGroup --gateway-name $appgwName -n "backend-settings" -o json 2>$null
+        if ($httpJson) {
+            $http = $httpJson | ConvertFrom-Json
+            if ($http.pickHostNameFromBackendAddress -eq $true) {
+                Write-CheckPass "$appgwName backend-settings: pickHostNameFromBackendAddress = true"
+            } else {
+                Write-CheckWarn "$appgwName backend-settings: pickHostNameFromBackendAddress is false — probe host resolution may fail"
+            }
+        }
+    } catch {
+        Write-CheckWarn "${appgwName}: could not query HTTP settings"
+    }
+}
+
+} # end section 15
+
+###############################################################################
 # 16. Spoke VM Local Web Application (via run-command)
 ###############################################################################
 if (ShouldRun 16) {
@@ -725,14 +787,17 @@ foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
     $vmName = "$Prefix-$spoke-vm"
     Write-Info "Testing local web app on $vmName (this takes ~15-30s per VM)..."
     try {
-        $resultJson = az vm run-command invoke -g $ResourceGroup -n $vmName `
+        $resultRaw = az vm run-command invoke -g $ResourceGroup -n $vmName `
             --command-id RunShellScript `
             --scripts "curl -s -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null" `
-            -o json 2>$null
-        if ($resultJson) {
-            $result = $resultJson | ConvertFrom-Json
-            $stdoutEntry = $result.value | Where-Object { $_.code -like "*stdout*" }
-            $httpCode = if ($stdoutEntry -and $stdoutEntry.message) { $stdoutEntry.message.Trim() } else { "" }
+            --query "value[0].message" -o tsv 2>$null
+        # az CLI with -o tsv returns an array of lines in PowerShell; join for regex
+        $resultMsg = if ($resultRaw -is [array]) { $resultRaw -join "`n" } else { $resultRaw }
+        if ($resultMsg) {
+            $httpCode = ""
+            if ($resultMsg -match '(?s)\[stdout\]\s*(.*?)\s*\[stderr\]') {
+                $httpCode = $matches[1].Trim()
+            }
             if ($httpCode -eq "200") {
                 Write-CheckPass "$vmName`: local web app returns HTTP 200"
             } elseif ([string]::IsNullOrEmpty($httpCode) -or $httpCode -eq "000") {
@@ -749,6 +814,221 @@ foreach ($spoke in @("spoke11", "spoke12", "spoke21", "spoke22")) {
 }
 
 } # end section 16
+
+###############################################################################
+# 17. Private Endpoint Configuration
+###############################################################################
+if (ShouldRun 17) {
+Write-Section "17. Private Endpoint Configuration"
+
+$peName = "${Prefix}-hub1-web-pe"
+try {
+    $peJson = az network private-endpoint show -g $ResourceGroup -n $peName -o json 2>$null
+    if ($peJson) {
+        $pe = $peJson | ConvertFrom-Json
+
+        # Connection status
+        $connStatus = $pe.privateLinkServiceConnections[0].privateLinkServiceConnectionState.status
+        if ($connStatus -eq "Approved") {
+            Write-CheckPass "PE connection status: Approved"
+        } else {
+            Write-CheckFail "PE connection status: $connStatus (expected: Approved)"
+        }
+
+        # PE NIC private IP
+        $nicId = $pe.networkInterfaces[0].id
+        if ($nicId) {
+            $nicIp = az network nic show --ids $nicId --query "ipConfigurations[0].privateIPAddress" -o tsv 2>$null
+            if ($nicIp -match '^10\.1\.4\.') {
+                Write-CheckPass "PE NIC private IP: $nicIp (in PE subnet)"
+            } elseif ($nicIp) {
+                Write-CheckFail "PE NIC IP unexpected: $nicIp (expected 10.1.4.x)"
+            } else {
+                Write-CheckFail "PE NIC has no private IP"
+            }
+        } else {
+            Write-CheckFail "PE has no associated NIC"
+        }
+    } else {
+        Write-CheckFail "Private Endpoint '${peName}' not found"
+    }
+} catch {
+    Write-CheckWarn "Could not query PE '${peName}' — $($_.Exception.Message)"
+}
+
+# Check PE subnet network policies
+try {
+    $subnetJson = az network vnet subnet show -g $ResourceGroup --vnet-name "${Prefix}-hub1-vnet" -n PrivateEndpointSubnet -o json 2>$null
+    if ($subnetJson) {
+        $subnet = $subnetJson | ConvertFrom-Json
+        $pePolicies = $subnet.privateEndpointNetworkPolicies
+        if ($pePolicies -eq "Enabled") {
+            Write-CheckPass "PE subnet privateEndpointNetworkPolicies: Enabled (UDR/NSG apply to PE traffic)"
+        } else {
+            Write-CheckFail "PE subnet privateEndpointNetworkPolicies: $pePolicies (expected: Enabled — PE traffic may bypass UDR/NSG)"
+        }
+    } else {
+        Write-CheckFail "PrivateEndpointSubnet not found in ${Prefix}-hub1-vnet"
+    }
+} catch {
+    Write-CheckWarn "Could not query PE subnet — $($_.Exception.Message)"
+}
+
+} # end section 17
+
+###############################################################################
+# 18. Private DNS Zone
+###############################################################################
+if (ShouldRun 18) {
+Write-Section "18. Private DNS Zone"
+
+$dnsZoneName = "privatelink.web.core.windows.net"
+$dnsZone = az network private-dns zone show -g $ResourceGroup -n $dnsZoneName --query "name" -o tsv 2>$null
+if ($dnsZone) {
+    Write-CheckPass "Private DNS Zone exists: $dnsZoneName"
+    # Check VNet links
+    $vnetLinks = az network private-dns link vnet list -g $ResourceGroup -z $dnsZoneName --query "[].name" -o tsv 2>$null
+    $linkCount = ($vnetLinks -split "`n" | Where-Object { $_ }).Count
+    if ($linkCount -eq 2) {
+        Write-CheckPass "Private DNS Zone has $linkCount VNet links (hub1 + hub2 only)"
+    } elseif ($linkCount -gt 2) {
+        Write-CheckWarn "Private DNS Zone has $linkCount VNet links (expected 2: hub VNets only — spoke/onprem should use NVA DNS)"
+    } else {
+        Write-CheckFail "Private DNS Zone has only $linkCount VNet links (expected 2: hub1 + hub2)"
+    }
+    # Check A record exists
+    $aRecord = az network private-dns record-set a list -g $ResourceGroup -z $dnsZoneName --query "[0].{name:name, ip:aRecords[0].ipv4Address}" -o json 2>$null | ConvertFrom-Json
+    if ($aRecord -and $aRecord.ip -match '^10\.1\.4\.') {
+        Write-CheckPass "DNS A record '$($aRecord.name)' resolves to PE IP: $($aRecord.ip)"
+    } elseif ($aRecord) {
+        Write-CheckFail "DNS A record '$($aRecord.name)' IP unexpected: $($aRecord.ip)"
+    } else {
+        Write-CheckFail "No A records found in $dnsZoneName"
+    }
+} else {
+    Write-CheckWarn "Private DNS Zone $dnsZoneName not found — PE DNS checks skipped"
+}
+
+} # end section 18
+
+###############################################################################
+# 19. dnsmasq on NVAs
+###############################################################################
+if (ShouldRun 19) {
+Write-Section "19. dnsmasq on NVAs"
+
+foreach ($hubIdx in 1, 2) {
+    $nvaVmName = "${Prefix}-hub${hubIdx}-nva"
+    try {
+        $result = az vm run-command invoke -g $ResourceGroup -n $nvaVmName --command-id RunShellScript `
+            --scripts "systemctl is-active dnsmasq && cat /etc/dnsmasq.d/azure-dns.conf 2>/dev/null | head -3" `
+            --query "value[0].message" -o tsv 2>$null
+        if ($result -match "active") {
+            Write-CheckPass "$nvaVmName`: dnsmasq is running"
+            if ($result -match "168.63.129.16") {
+                Write-CheckPass "$nvaVmName`: dnsmasq forwards to Azure DNS (168.63.129.16)"
+            } else {
+                Write-CheckWarn "$nvaVmName`: dnsmasq config may not forward to Azure DNS"
+            }
+        } else {
+            Write-CheckFail "$nvaVmName`: dnsmasq is not active"
+        }
+    } catch {
+        Write-CheckWarn "$nvaVmName`: could not check dnsmasq — $($_.Exception.Message)"
+    }
+}
+
+} # end section 19
+
+###############################################################################
+# 20. Static Website DNS Resolution (from VMs)
+###############################################################################
+if (ShouldRun 20) {
+Write-Section "20. Static Website DNS Resolution and VNet DNS Configuration"
+
+# Check VNet custom DNS settings
+$expectedDns = @{
+    "${Prefix}-spoke11-vnet" = @("10.1.1.200")
+    "${Prefix}-spoke12-vnet" = @("10.1.1.200")
+    "${Prefix}-spoke21-vnet" = @("10.2.1.200")
+    "${Prefix}-spoke22-vnet" = @("10.2.1.200")
+    "${Prefix}-onprem-vnet"  = @("10.1.1.200", "10.2.1.200")
+}
+foreach ($entry in $expectedDns.GetEnumerator()) {
+    $vnetName = $entry.Key
+    $expected = $entry.Value
+    $actual = az network vnet show -g $ResourceGroup -n $vnetName --query "dhcpOptions.dnsServers" -o json 2>$null | ConvertFrom-Json
+    if (-not $actual -or $actual.Count -eq 0) {
+        Write-CheckFail "${vnetName}: custom DNS not set (using Azure default — PE resolution will fail)"
+    } else {
+        $missing = $expected | Where-Object { $_ -notin $actual }
+        if ($missing.Count -eq 0) {
+            Write-CheckPass "${vnetName}: custom DNS servers: $($actual -join ', ')"
+        } else {
+            Write-CheckFail "${vnetName}: DNS servers $($actual -join ', ') — missing: $($missing -join ', ')"
+        }
+    }
+}
+
+# Get Storage Account FQDN from the PE resource
+$peName = "${Prefix}-hub1-web-pe"
+$peJson = az network private-endpoint show -g $ResourceGroup -n $peName -o json 2>$null
+if ($peJson) {
+    $pe = $peJson | ConvertFrom-Json
+    $saId = $pe.privateLinkServiceConnections[0].privateLinkServiceId
+    $saName = ($saId -split '/')[-1]
+    # Static website FQDN from custom DNS config on PE
+    $webFqdn = $pe.customDnsConfigs | Where-Object { $_.fqdn -match 'web\.core\.windows\.net' } | Select-Object -First 1 -ExpandProperty fqdn
+    if (-not $webFqdn) {
+        # Fallback: query storage account for primary web endpoint
+        $webEndpoint = az storage account show -g $ResourceGroup -n $saName --query "primaryEndpoints.web" -o tsv 2>$null
+        $webFqdn = ($webEndpoint -replace 'https://', '' -replace '/$', '')
+    }
+    if (-not $webFqdn) {
+        Write-CheckFail "Could not determine static website FQDN for storage account $saName"
+    } else {
+        # Get expected PE IP from NIC
+        $nicId = $pe.networkInterfaces[0].id
+        $expectedIp = az network nic show --ids $nicId --query "ipConfigurations[0].privateIPAddress" -o tsv 2>$null
+        if (-not $expectedIp) { $expectedIp = "10.1.4.4" }
+
+        # Test DNS resolution from VMs
+        $testVms = @("spoke11-vm", "spoke12-vm", "spoke21-vm", "spoke22-vm", "onprem-vm")
+        foreach ($vm in $testVms) {
+            $vmName = "$Prefix-$vm"
+            Write-Info "Testing DNS resolution of $webFqdn from ${vmName}..."
+            try {
+                $resultRaw = az vm run-command invoke -g $ResourceGroup -n $vmName `
+                    --command-id RunShellScript `
+                    --scripts "nslookup $webFqdn 2>/dev/null | grep -A1 'Name:' | grep Address | awk '{print `$NF}'" `
+                    --query "value[0].message" -o tsv 2>$null
+                # az CLI with -o tsv returns an array of lines in PowerShell; join for regex
+                $resultMsg = if ($resultRaw -is [array]) { $resultRaw -join "`n" } else { $resultRaw }
+                if ($resultMsg) {
+                    $resolvedIp = ""
+                    if ($resultMsg -match '(?s)\[stdout\]\s*(.*?)\s*\[stderr\]') {
+                        $resolvedIp = $matches[1].Trim()
+                    }
+                    if ($resolvedIp -eq $expectedIp) {
+                        Write-CheckPass "$vmName resolves $webFqdn to PE IP $resolvedIp"
+                    } elseif ([string]::IsNullOrEmpty($resolvedIp)) {
+                        Write-CheckFail "$vmName cannot resolve $webFqdn (DNS failure)"
+                    } else {
+                        Write-CheckFail "$vmName resolves $webFqdn to $resolvedIp (expected PE IP $expectedIp — DNS may be misconfigured)"
+                    }
+                } else {
+                    Write-CheckWarn "${vmName}: run-command returned no output"
+                }
+            } catch {
+                Write-CheckWarn "${vmName}: could not run DNS check — $($_.Exception.Message)"
+            }
+        }
+    }
+} else {
+    Write-CheckWarn "Private Endpoint '${peName}' not found — skipping DNS resolution checks"
+}
+
+} # end section 20
 
 ###############################################################################
 # Summary

@@ -1,0 +1,152 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.40.2.10011",
+      "templateHash": "7833091897685477430"
+    }
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure region"
+      }
+    },
+    "prefix": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource naming prefix"
+      }
+    },
+    "privateEndpointSubnetId": {
+      "type": "string",
+      "metadata": {
+        "description": "Private Endpoint subnet ID (must have privateEndpointNetworkPolicies enabled)"
+      }
+    },
+    "vnetLinks": {
+      "type": "array",
+      "metadata": {
+        "description": "VNet IDs to link to the Private DNS Zone (hub VNets only)"
+      }
+    }
+  },
+  "variables": {
+    "uniqueSuffix": "[uniqueString(resourceGroup().id, parameters('prefix'))]",
+    "saName": "[toLower(format('{0}web{1}', replace(parameters('prefix'), '-', ''), take(variables('uniqueSuffix'), 8)))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('saName')]",
+      "location": "[parameters('location')]",
+      "kind": "StorageV2",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "properties": {
+        "accessTier": "Hot",
+        "supportsHttpsTrafficOnly": true,
+        "allowBlobPublicAccess": true,
+        "minimumTlsVersion": "TLS1_2"
+      }
+    },
+    {
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2024-06-01",
+      "name": "privatelink.web.core.windows.net",
+      "location": "global"
+    },
+    {
+      "copy": {
+        "name": "dnsVnetLinks",
+        "count": "[length(parameters('vnetLinks'))]",
+        "mode": "serial",
+        "batchSize": 1
+      },
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2024-06-01",
+      "name": "[format('{0}/{1}', 'privatelink.web.core.windows.net', format('{0}-link', parameters('vnetLinks')[copyIndex()].name))]",
+      "location": "global",
+      "properties": {
+        "virtualNetwork": {
+          "id": "[parameters('vnetLinks')[copyIndex()].vnetId]"
+        },
+        "registrationEnabled": false
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.web.core.windows.net')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}-hub1-web-pe', parameters('prefix'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "subnet": {
+          "id": "[parameters('privateEndpointSubnetId')]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "[format('{0}-web-connection', parameters('prefix'))]",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]",
+              "groupIds": [
+                "web"
+              ]
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', format('{0}-hub1-web-pe', parameters('prefix')), 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "privatelink-web-core-windows-net",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.web.core.windows.net')]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', 'privatelink.web.core.windows.net')]",
+        "[resourceId('Microsoft.Network/privateEndpoints', format('{0}-hub1-web-pe', parameters('prefix')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "storageAccountName": {
+      "type": "string",
+      "value": "[variables('saName')]"
+    },
+    "staticWebsiteFqdn": {
+      "type": "string",
+      "value": "[replace(replace(reference(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), '2023-05-01').primaryEndpoints.web, 'https://', ''), '/', '')]"
+    },
+    "privateEndpointName": {
+      "type": "string",
+      "value": "[format('{0}-hub1-web-pe', parameters('prefix'))]"
+    },
+    "privateEndpointId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Network/privateEndpoints', format('{0}-hub1-web-pe', parameters('prefix')))]"
+    },
+    "privateDnsZoneName": {
+      "type": "string",
+      "value": "privatelink.web.core.windows.net"
+    }
+  }
+}

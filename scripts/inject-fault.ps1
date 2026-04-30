@@ -20,7 +20,11 @@
 .PARAMETER VpnSharedKey
     Shared key for VPN connection recreation (default: FaultTestSharedKey123!).
 
+.PARAMETER List
+    List all available fault scenarios with descriptions and exit.
+
 .EXAMPLE
+    .\inject-fault.ps1 -List
     .\inject-fault.ps1 -Scenario ip-forwarding-hub1
     .\inject-fault.ps1 -Scenario ip-forwarding-hub1 -Revert
     .\inject-fault.ps1 -Scenario multi-fault -ResourceGroup myrg -Prefix test
@@ -28,7 +32,7 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Position = 0)]
     [ValidateSet(
         "ip-forwarding-hub1", "ip-forwarding-hub2",
         "udr-wrong-nexthop", "udr-missing-route", "udr-detach",
@@ -36,9 +40,13 @@ param(
         "nva-iptables-drop", "nva-iptables-block-spoke", "nva-os-forwarding", "nva-stop-ssh", "nva-no-internet",
         "vpn-disconnect", "bgp-propagation", "gw-disable-bgp-propagation", "gateway-nsg",
         "peering-disconnect", "peering-no-gateway-transit", "peering-no-use-remote-gw",
+        "appgw-probe-misconfigure",
+        "pe-nsg-block", "pe-dns-break", "pe-route-missing", "pe-dns-override",
         "multi-fault"
     )]
     [string]$Scenario,
+
+    [switch]$List,
 
     [Alias("g")]
     [string]$ResourceGroup = "netsre-rg",
@@ -50,7 +58,65 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ─── Derived resource names ─────────────────────────────────────────────────
+# ─── List scenarios ─────────────────────────────────────────────────────────
+if ($List) {
+    $scenarios = @(
+        @{ Name = "ip-forwarding-hub1";         Category = "IP Forwarding"; Description = "Disable NIC-level IP forwarding on Hub1 NVA" }
+        @{ Name = "ip-forwarding-hub2";         Category = "IP Forwarding"; Description = "Disable NIC-level IP forwarding on Hub2 NVA" }
+        @{ Name = "udr-wrong-nexthop";          Category = "UDR";           Description = "Set incorrect next-hop IP in spoke route table" }
+        @{ Name = "udr-missing-route";          Category = "UDR";           Description = "Remove the default route from spoke route table" }
+        @{ Name = "udr-detach";                 Category = "UDR";           Description = "Detach route table from spoke subnet" }
+        @{ Name = "nsg-block-icmp";             Category = "NSG";           Description = "Add high-priority NSG rule blocking ICMP" }
+        @{ Name = "nsg-block-all";              Category = "NSG";           Description = "Add high-priority NSG rule blocking all traffic" }
+        @{ Name = "nsg-block-ssh";              Category = "NSG";           Description = "Add high-priority NSG rule blocking SSH (port 22)" }
+        @{ Name = "nva-iptables-drop";          Category = "NVA";           Description = "Drop all forwarded traffic via iptables on Hub1 NVA" }
+        @{ Name = "nva-iptables-block-spoke";   Category = "NVA";           Description = "Block traffic to/from a specific spoke via iptables" }
+        @{ Name = "nva-os-forwarding";          Category = "NVA";           Description = "Disable OS-level IP forwarding (sysctl) on Hub1 NVA" }
+        @{ Name = "nva-stop-ssh";               Category = "NVA";           Description = "Stop the SSH service on Hub1 NVA" }
+        @{ Name = "nva-no-internet";            Category = "NVA";           Description = "Block outbound internet traffic on NVA via iptables" }
+        @{ Name = "vpn-disconnect";             Category = "VPN/BGP";       Description = "Delete VPN connection between Hub1 and on-premises" }
+        @{ Name = "bgp-propagation";            Category = "VPN/BGP";       Description = "Enable BGP route propagation on spoke route table (bypasses NVA)" }
+        @{ Name = "gw-disable-bgp-propagation"; Category = "VPN/BGP";       Description = "Disable BGP route propagation on gateway route table" }
+        @{ Name = "gateway-nsg";                Category = "VPN/BGP";       Description = "Block VPN gateway traffic with NSG on GatewaySubnet" }
+        @{ Name = "peering-disconnect";         Category = "Peering";       Description = "Remove VNet peering between Hub1 and Spoke11" }
+        @{ Name = "peering-no-gateway-transit"; Category = "Peering";       Description = "Disable gateway transit on hub-to-spoke peering" }
+        @{ Name = "peering-no-use-remote-gw";   Category = "Peering";       Description = "Disable 'use remote gateway' on spoke-to-hub peering" }
+        @{ Name = "pe-nsg-block";                Category = "Private Link"; Description = "Add NSG deny rule blocking traffic to the PE subnet (10.1.4.0/24)" }
+        @{ Name = "pe-dns-break";                Category = "Private Link"; Description = "Stop dnsmasq on Hub1 NVA, breaking PE DNS resolution from on-prem" }
+        @{ Name = "pe-route-missing";            Category = "Private Link"; Description = "Remove PE subnet UDR from spoke11 route table (traffic bypasses NVA)" }
+        @{ Name = "pe-dns-override";            Category = "Private Link"; Description = "Set spoke VNet DNS to Azure default and reboot VM — PE FQDN resolves to public IP while all other connectivity stays healthy" }
+        @{ Name = "appgw-probe-misconfigure";   Category = "AppGW";        Description = "Set AppGW health probe host to 127.0.0.1 (backends become Unhealthy)" }
+        @{ Name = "multi-fault";                Category = "Combo";         Description = "Inject multiple faults simultaneously" }
+    )
+
+    Write-Host ""
+    Write-Host "Available fault injection scenarios:" -ForegroundColor Cyan
+    Write-Host "====================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    $currentCategory = ""
+    foreach ($s in $scenarios) {
+        if ($s.Category -ne $currentCategory) {
+            $currentCategory = $s.Category
+            Write-Host "  [$currentCategory]" -ForegroundColor Yellow
+        }
+        Write-Host ("    {0,-32} {1}" -f $s.Name, $s.Description)
+    }
+
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor Cyan
+    Write-Host "  .\inject-fault.ps1 -Scenario <name>          # Inject fault"
+    Write-Host "  .\inject-fault.ps1 -Scenario <name> -Revert  # Revert fault"
+    Write-Host ""
+    return
+}
+
+if (-not $Scenario) {
+    Write-Host "ERROR: -Scenario is required. Use -List to see available scenarios." -ForegroundColor Red
+    return
+}
+
+# ─── Derived resource names─────────────────────────────────────────────────
 # Must match Bicep naming conventions exactly
 $Hub1NvaNic       = "$Prefix-hub1-nva-nic"
 $Hub2NvaNic       = "$Prefix-hub2-nva-nic"
@@ -479,6 +545,115 @@ function Invoke-PeeringNoUseRemoteGw {
     }
 }
 
+# ─── Application Gateway Fault Scenarios ───────────────────────────────────
+
+function Invoke-AppgwProbeMisconfigure {
+    # Set health probe host to 127.0.0.1 — backends will be marked Unhealthy
+    foreach ($hub in @("hub1", "hub2")) {
+        $appgwName = "${Prefix}-${hub}-appgw"
+        $probeName = "backend-probe"
+        if ($Revert) {
+            Write-Info "Reverting $appgwName probe to pick host from backend settings..."
+            az network application-gateway probe update -g $ResourceGroup --gateway-name $appgwName -n $probeName `
+                --host-name-from-http-settings true --host "" 2>$null | Out-Null
+            Write-Ok "$appgwName probe reverted (pickHostNameFromBackendHttpSettings=true)"
+        } else {
+            Write-Warn "Setting $appgwName probe host to 127.0.0.1..."
+            az network application-gateway probe update -g $ResourceGroup --gateway-name $appgwName -n $probeName `
+                --host "127.0.0.1" --host-name-from-http-settings false 2>$null | Out-Null
+            Write-Ok "$appgwName probe host set to 127.0.0.1"
+        }
+    }
+    if (-not $Revert) {
+        Write-Impact "Both AppGW backends will become Unhealthy (probe to 127.0.0.1 times out)."
+        Write-Impact "Connection Monitors and Traffic Manager endpoints will FAIL."
+    }
+}
+
+# ─── Private Link Fault Scenarios ──────────────────────────────────────────
+
+function Invoke-PeNsgBlock {
+    $nsgName = "${Prefix}-hub1-pe-nsg"
+    if ($Revert) {
+        Write-Info "Removing NSG deny rule blocking PE subnet traffic"
+        az network nsg rule delete -g $ResourceGroup --nsg-name $nsgName -n DenyPeSubnet -o none 2>$null
+        Write-Ok "NSG deny rule removed from PE subnet NSG"
+    } else {
+        Write-Info "Adding NSG deny rule to block all inbound traffic to PE subnet"
+        Write-Info "REASON: A misconfigured NSG on the PE subnet can block all private endpoint traffic."
+        az network nsg rule create -g $ResourceGroup --nsg-name $nsgName -n DenyPeSubnet `
+            --priority 100 --direction Inbound --access Deny `
+            --source-address-prefixes '*' --destination-address-prefixes '10.1.4.0/24' `
+            --destination-port-ranges '*' --protocol '*' -o none
+        Write-Ok "NSG deny rule added to PE subnet"
+        Write-Impact "All spoke and on-prem traffic to the static website PE will be blocked."
+        Write-Impact "Connection Monitors: spoke11-to-staticweb, spoke21-to-staticweb, onprem-to-staticweb will FAIL."
+    }
+}
+
+function Invoke-PeDnsBreak {
+    $hub1NvaVm = "${Prefix}-hub1-nva"
+    if ($Revert) {
+        Write-Info "Restarting dnsmasq on Hub1 NVA"
+        az vm run-command invoke -g $ResourceGroup -n $hub1NvaVm --command-id RunShellScript `
+            --scripts "sudo systemctl start dnsmasq && sudo systemctl enable dnsmasq" -o none
+        Write-Ok "dnsmasq restarted on Hub1 NVA"
+    } else {
+        Write-Info "Stopping dnsmasq on Hub1 NVA to break PE DNS resolution"
+        Write-Info "REASON: On-prem VMs use NVA as DNS proxy. Without dnsmasq, PE FQDN cannot resolve to private IP."
+        az vm run-command invoke -g $ResourceGroup -n $hub1NvaVm --command-id RunShellScript `
+            --scripts "sudo systemctl stop dnsmasq && sudo systemctl disable dnsmasq" -o none
+        Write-Ok "dnsmasq stopped on Hub1 NVA"
+        Write-Impact "On-prem DNS resolution of storage account static website FQDN will fail."
+        Write-Impact "Connection Monitors: onprem-to-staticweb may show latency change or connection issues."
+    }
+}
+
+function Invoke-PeRouteMissing {
+    $rtName = "${Prefix}-spoke11-rt"
+    if ($Revert) {
+        Write-Info "Re-adding PE subnet route to spoke11 route table"
+        az network route-table route create -g $ResourceGroup --route-table-name $rtName `
+            -n to-pe-subnet --address-prefix 10.1.4.0/24 `
+            --next-hop-type VirtualAppliance --next-hop-ip-address (Get-NvaLbIp) -o none
+        Write-Ok "PE subnet route restored on spoke11 route table"
+    } else {
+        Write-Info "Removing PE subnet UDR from spoke11 route table"
+        Write-Info "REASON: Without PE subnet route, spoke11 traffic to PE uses VNet peering (bypasses NVA)."
+        az network route-table route delete -g $ResourceGroup --route-table-name $rtName -n to-pe-subnet -o none
+        Write-Ok "PE subnet route removed from spoke11 route table"
+        Write-Impact "Spoke11 traffic to static website PE bypasses the NVA (may still work but without NVA inspection)."
+        Write-Impact "If NVA provides DNS proxy or security, connectivity behavior changes."
+    }
+}
+
+function Invoke-PeDnsOverride {
+    $spokeVnet = "${Prefix}-spoke11-vnet"
+    $vmName = "${Prefix}-spoke11-vm"
+    if ($Revert) {
+        Write-Info "Restoring custom DNS server on spoke11 VNet to NVA LB"
+        $nvaLbIp = Get-NvaLbIp
+        az network vnet update -g $ResourceGroup -n $spokeVnet --dns-servers $nvaLbIp -o none
+        Write-Ok "Spoke11 VNet DNS restored to NVA LB ($nvaLbIp)"
+        Write-Info "Restarting $vmName to pick up restored DNS configuration..."
+        az vm restart -g $ResourceGroup -n $vmName -o none
+        Write-Ok "$vmName restarted — will use NVA as DNS server again"
+    } else {
+        Write-Info "Setting spoke11 VNet DNS to Azure default (removing custom DNS server)"
+        Write-Info "REASON: Without custom DNS pointing to NVA/dnsmasq, the spoke resolves PE FQDNs via Azure DNS"
+        Write-Info "        but has no Private DNS Zone link, so it gets the public IP instead of the private endpoint IP."
+        Write-Info "        This is a subtle misconfiguration: all other connectivity works, only PE resolution breaks."
+        az network vnet update -g $ResourceGroup -n $spokeVnet --dns-servers "" -o none
+        Write-Ok "Spoke11 VNet DNS set to Azure default"
+        Write-Info "Restarting $vmName to force DHCP lease renewal with new DNS settings..."
+        az vm restart -g $ResourceGroup -n $vmName -o none
+        Write-Ok "$vmName restarted — DNS change is now active"
+        Write-Impact "Spoke11 VM resolves storage account FQDN to public IP instead of PE private IP."
+        Write-Impact "Connection Monitor spoke11-to-staticweb will FAIL (HTTP probe gets wrong backend)."
+        Write-Impact "All other spoke11 connectivity (cross-spoke, on-prem, internet) remains HEALTHY."
+    }
+}
+
 function Invoke-MultiFault {
     $allScenarios = @(
         "ip-forwarding-hub1", "ip-forwarding-hub2",
@@ -486,7 +661,9 @@ function Invoke-MultiFault {
         "nsg-block-icmp", "nsg-block-all", "nsg-block-ssh",
         "nva-iptables-drop", "nva-iptables-block-spoke", "nva-os-forwarding", "nva-stop-ssh", "nva-no-internet",
         "vpn-disconnect", "bgp-propagation", "gw-disable-bgp-propagation", "gateway-nsg",
-        "peering-disconnect", "peering-no-gateway-transit", "peering-no-use-remote-gw"
+        "peering-disconnect", "peering-no-gateway-transit", "peering-no-use-remote-gw",
+        "appgw-probe-misconfigure",
+        "pe-nsg-block", "pe-dns-break", "pe-route-missing", "pe-dns-override"
     )
     if ($Revert) {
         Write-Info "Reverting ALL known faults (multi-fault revert)"
@@ -536,6 +713,11 @@ function Invoke-Scenario {
             "peering-disconnect"       { Invoke-PeeringDisconnect }
             "peering-no-gateway-transit" { Invoke-PeeringNoGatewayTransit }
             "peering-no-use-remote-gw" { Invoke-PeeringNoUseRemoteGw }
+            "pe-nsg-block"             { Invoke-PeNsgBlock }
+            "pe-dns-break"             { Invoke-PeDnsBreak }
+            "pe-route-missing"         { Invoke-PeRouteMissing }
+            "pe-dns-override"          { Invoke-PeDnsOverride }
+            "appgw-probe-misconfigure" { Invoke-AppgwProbeMisconfigure }
             "multi-fault"              { Invoke-MultiFault }
         }
     } finally {

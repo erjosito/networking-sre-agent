@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "value": "eastus2" },
+    "prefix": { "value": "netsre" },
+    "spoke11VmId": { "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Compute/virtualMachines/netsre-spoke11-vm" },
+    "spoke12VmId": { "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Compute/virtualMachines/netsre-spoke12-vm" },
+    "spoke21VmId": { "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Compute/virtualMachines/netsre-spoke21-vm" },
+    "spoke22VmId": { "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Compute/virtualMachines/netsre-spoke22-vm" },
+    "onpremVmId": { "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.Compute/virtualMachines/netsre-onprem-vm" },
+    "spoke11VmName": { "value": "netsre-spoke11-vm" },
+    "spoke12VmName": { "value": "netsre-spoke12-vm" },
+    "spoke21VmName": { "value": "netsre-spoke21-vm" },
+    "spoke22VmName": { "value": "netsre-spoke22-vm" },
+    "onpremVmName": { "value": "netsre-onprem-vm" },
+    "spoke11VmIp": { "value": "10.11.0.4" },
+    "spoke12VmIp": { "value": "10.12.0.4" },
+    "spoke21VmIp": { "value": "10.21.0.4" },
+    "spoke22VmIp": { "value": "10.22.0.4" },
+    "onpremVmIp": { "value": "10.100.1.4" },
+    "trafficManagerFqdn": { "value": "netsre-webapp-i4pjnv.trafficmanager.net" },
+    "staticWebsiteFqdn": { "value": "" },
+    "logAnalyticsWorkspaceId": { "value": "/subscriptions/a8fbd8e1-fb5a-4411-804a-4ac80929c93c/resourceGroups/netsre-rg/providers/Microsoft.OperationalInsights/workspaces/netsre-law" }
+  }
+}

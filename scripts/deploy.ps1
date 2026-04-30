@@ -142,6 +142,57 @@ $DeployDuration = [math]::Round(($DeployEnd - $DeployStart).TotalMinutes)
 
 Write-Info "Deployment completed in ~$DeployDuration minutes."
 
+# ─── Post-deployment: Enable static website and upload index.html ────────────
+# The deployment script (Microsoft.Resources/deploymentScripts) cannot be used
+# because subscription policies block key-based auth on storage accounts, which
+# the deployment scripts service requires internally for its own artifact storage.
+
+Write-Host ""
+Write-Info "Configuring static website for Private Endpoint health probes..."
+
+$saName = az storage account list -g $ResourceGroup `
+    --query "[?starts_with(name,'${Prefix}web') || starts_with(name,'$($Prefix.Replace('-',''))web')].name | [0]" -o tsv 2>$null
+
+if ($saName) {
+    Write-Info "Storage account: $saName"
+
+    # Enable static website (data-plane, uses caller's Entra ID via --auth-mode login)
+    az storage blob service-properties update `
+        --account-name $saName `
+        --static-website `
+        --index-document index.html `
+        --404-document index.html `
+        --auth-mode login `
+        --output none 2>$null
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Info "Static website enabled."
+    } else {
+        Write-Warn "Could not enable static website. You may need Storage Blob Data Contributor role."
+    }
+
+    # Upload index.html
+    $htmlFile = Join-Path $env:TEMP "sre-index.html"
+    Set-Content -Path $htmlFile -Value '<html><head><title>SRE Health Probe</title></head><body><h1>OK</h1><p>Private Endpoint connectivity verified.</p></body></html>' -NoNewline
+    az storage blob upload `
+        --account-name $saName `
+        --container-name '$web' `
+        --name index.html `
+        --file $htmlFile `
+        --overwrite `
+        --auth-mode login `
+        --output none 2>$null
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Info "index.html uploaded to static website."
+    } else {
+        Write-Warn "Could not upload index.html. You may need Storage Blob Data Contributor role."
+    }
+    Remove-Item $htmlFile -ErrorAction SilentlyContinue
+} else {
+    Write-Warn "No storage account found for static website. Private Endpoint HTTP probes may fail."
+}
+
 # ─── Print outputs ───────────────────────────────────────────────────────────
 
 Write-Host ""

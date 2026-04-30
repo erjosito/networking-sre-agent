@@ -1,5 +1,6 @@
 // Connection Monitors module: Log Analytics workspace, Connection Monitor with
-// ICMP + TCP test configurations for all spoke-to-spoke and spoke-to-onprem paths.
+// ICMP + TCP + HTTP test configurations for all spoke-to-spoke, spoke-to-onprem,
+// and private endpoint (static website) paths.
 
 @description('Azure region')
 param location string
@@ -30,6 +31,9 @@ param onpremVmIp string
 
 @description('Traffic Manager FQDN for HTTP reachability test')
 param trafficManagerFqdn string = ''
+
+@description('Storage Account static website FQDN for Private Endpoint HTTP probe')
+param staticWebsiteFqdn string = ''
 
 @description('Log Analytics Workspace resource ID')
 param logAnalyticsWorkspaceId string
@@ -92,6 +96,13 @@ resource connectionMonitor 'Microsoft.Network/networkWatchers/connectionMonitors
         type: 'ExternalAddress'
         address: 'ifconfig.me'
       }
+      ...(empty(staticWebsiteFqdn) ? [] : [
+        {
+          name: 'staticweb-pe'
+          type: 'ExternalAddress'
+          address: staticWebsiteFqdn
+        }
+      ])
     ]
     testConfigurations: [
       {
@@ -132,20 +143,36 @@ resource connectionMonitor 'Microsoft.Network/networkWatchers/connectionMonitors
           roundTripTimeMs: 500
         }
       }
+      {
+        name: 'http-pe-test'
+        testFrequencySec: 60
+        protocol: 'Http'
+        httpConfiguration: {
+          port: 443
+          method: 'Get'
+          path: '/'
+          validStatusCodeRanges: [ '200' ]
+          preferHTTPS: true
+        }
+        successThreshold: {
+          checksFailedPercent: 50
+          roundTripTimeMs: 500
+        }
+      }
     ]
     testGroups: [
       {
         name: 'spoke11-to-spoke12'
         sources: [ spoke11VmName ]
         destinations: [ spoke12VmName ]
-        testConfigurations: [ 'icmp-test', 'tcp-ssh-test' ]
+        testConfigurations: [ 'icmp-test', 'tcp-ssh-test', 'http-web-test' ]
         disable: false
       }
       {
         name: 'spoke11-to-spoke21'
         sources: [ spoke11VmName ]
         destinations: [ spoke21VmName ]
-        testConfigurations: [ 'icmp-test', 'tcp-ssh-test' ]
+        testConfigurations: [ 'icmp-test', 'tcp-ssh-test', 'http-web-test' ]
         disable: false
       }
       {
@@ -159,14 +186,14 @@ resource connectionMonitor 'Microsoft.Network/networkWatchers/connectionMonitors
         name: 'spoke21-to-spoke22'
         sources: [ spoke21VmName ]
         destinations: [ spoke22VmName ]
-        testConfigurations: [ 'icmp-test', 'tcp-ssh-test' ]
+        testConfigurations: [ 'icmp-test', 'tcp-ssh-test', 'http-web-test' ]
         disable: false
       }
       {
         name: 'spoke21-to-spoke11'
         sources: [ spoke21VmName ]
         destinations: [ spoke11VmName ]
-        testConfigurations: [ 'icmp-test', 'tcp-ssh-test' ]
+        testConfigurations: [ 'icmp-test', 'tcp-ssh-test', 'http-web-test' ]
         disable: false
       }
       {
@@ -192,6 +219,29 @@ resource connectionMonitor 'Microsoft.Network/networkWatchers/connectionMonitors
         testConfigurations: [ 'http-web-test' ]
         disable: false
       }
+      ...(empty(staticWebsiteFqdn) ? [] : [
+        {
+          name: 'spoke11-to-staticweb'
+          sources: [ spoke11VmName ]
+          destinations: [ 'staticweb-pe' ]
+          testConfigurations: [ 'http-pe-test' ]
+          disable: false
+        }
+        {
+          name: 'spoke21-to-staticweb'
+          sources: [ spoke21VmName ]
+          destinations: [ 'staticweb-pe' ]
+          testConfigurations: [ 'http-pe-test' ]
+          disable: false
+        }
+        {
+          name: 'onprem-to-staticweb'
+          sources: [ onpremVmName ]
+          destinations: [ 'staticweb-pe' ]
+          testConfigurations: [ 'http-pe-test' ]
+          disable: false
+        }
+      ])
     ]
     outputs: [
       {

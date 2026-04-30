@@ -1,0 +1,105 @@
+# SRE Agent Configuration Manifest
+# This file declares the desired state for the Azure SRE Agent.
+# Run scripts/configure-sre-agent.ps1 to reconcile this manifest against the live agent.
+
+agent:
+  name: netsre-sre-agent
+  resourceGroup: netsre-rg
+
+# Knowledge base files to upload (relative to repo root)
+knowledge:
+  - knowledge/azure-networking-fundamentals.md
+  - knowledge/hub-spoke-topology.md
+  - knowledge/vpn-expressroute-connectivity.md
+  - knowledge/expressroute-deep-dive.md
+  - knowledge/network-security-nva.md
+  - knowledge/load-balancing-services.md
+  - knowledge/dns-and-private-link.md
+  - knowledge/13-private-link-and-dns.md
+  - knowledge/monitoring-troubleshooting.md
+  - knowledge/common-failure-scenarios.md
+  - knowledge/azure-firewall-and-ddos.md
+  - knowledge/azure-front-door.md
+  - knowledge/virtual-wan.md
+
+# Custom agents (sub-agents)
+customAgents:
+  - name: network-expert
+    definitionFile: sre-agent-config/custom-agents/network-expert.yaml
+  - name: connectivity-triage
+    definitionFile: sre-agent-config/custom-agents/connectivity-triage.yaml
+
+# Skills
+skills:
+  - name: nva-troubleshooting
+    directory: sre-agent-config/skills/nva-troubleshooting
+  - name: vpn-bgp-diagnostics
+    directory: sre-agent-config/skills/vpn-bgp-diagnostics
+  - name: private-endpoint-dns
+    directory: sre-agent-config/skills/private-endpoint-dns
+
+# Incident response plans
+responsePlans:
+  - name: connectivity-failure
+    description: Route Connection Monitor failure alerts to the network expert
+    severity: [Sev1, Sev2]
+    titleContains: ""
+    customAgent: network-expert
+    autonomy: Review
+    cooldownHours: 3
+  - name: latency-degradation
+    description: Route high-latency alerts for investigation
+    severity: [Sev4]
+    titleContains: "latency"
+    customAgent: network-expert
+    autonomy: Review
+    cooldownHours: 6
+
+# Scheduled tasks
+scheduledTasks:
+  - name: daily-nva-health
+    description: Daily NVA health verification
+    schedule: "0 8 * * *"  # 8 AM UTC daily
+    maxExecutions: 365
+    autonomy: Autonomous
+    instructions: |
+      Run a comprehensive health check on all NVA VMs in the netsre-rg resource group.
+      For each NVA (netsre-hub1-nva, netsre-hub2-nva):
+      1. Verify the VM is running (az vm get-instance-view)
+      2. Check IP forwarding is enabled on the NIC (az network nic show)
+      3. Run 'sysctl net.ipv4.ip_forward' on the VM to verify OS-level forwarding
+      4. Run 'sudo iptables -t nat -L INTERNET_SNAT -n' to verify SNAT rules
+      5. Run 'systemctl is-active dnsmasq' to verify DNS proxy is running
+      6. Check the NVA load balancer health probe status
+      If any check fails, report the specific failure and suggest remediation steps
+      from the knowledge base.
+
+  - name: weekly-bgp-route-check
+    description: Weekly BGP route propagation verification
+    schedule: "0 6 * * 1"  # 6 AM UTC every Monday
+    maxExecutions: 52
+    autonomy: Autonomous
+    instructions: |
+      Verify BGP route propagation across all VPN gateways in netsre-rg.
+      1. Check VPN connection status for all 4 connections (hub1-to-onprem, hub2-to-onprem, onprem-to-hub1, onprem-to-hub2)
+      2. Get BGP peer status for each gateway (az network vnet-gateway list-bgp-peer-status)
+      3. Get learned routes for each gateway (az network vnet-gateway list-learned-routes)
+      4. Verify that spoke prefixes (10.11.0.0/16, 10.12.0.0/16, 10.21.0.0/16, 10.22.0.0/16) are learned by the onprem gateway
+      5. Verify that the onprem prefix (10.100.0.0/16) is learned by both hub gateways
+      6. Check that route tables have correct UDRs with BGP propagation disabled on spoke RTs
+      Report any missing routes or BGP peering issues with suggested fixes.
+
+  - name: weekly-connection-monitor-review
+    description: Weekly review of Connection Monitor test results
+    schedule: "0 9 * * 5"  # 9 AM UTC every Friday
+    maxExecutions: 52
+    autonomy: Review
+    instructions: |
+      Review Connection Monitor test results for the past 7 days in netsre-rg.
+      1. Query the netsre-connection-monitor for all test groups
+      2. Identify any tests with >5% failure rate over the week
+      3. For failing tests, correlate with Azure Monitor metrics and NVA logs
+      4. Check if any spoke-to-staticweb (private endpoint) tests show degradation
+      5. Compare latency trends for spoke-to-onprem tests (VPN path)
+      6. Generate a summary report of connectivity health trends
+      Flag any recurring failures that might indicate a systemic issue.
