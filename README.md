@@ -1,52 +1,87 @@
 # Azure Networking SRE Agent — Test Environment
 
-A ready-to-deploy Azure lab that builds a **multi-hub, hub-spoke network topology** complete with VPN gateways, NVA firewalls, and spoke workloads. It is designed to pair with the [Azure SRE Agent](https://sre.azure.com) (preview) so the agent can detect, investigate, and help resolve realistic networking incidents.
+A ready-to-deploy Azure lab that builds a **multi-hub, hub-spoke network topology** complete with VPN gateways, NVA firewalls, private endpoints, Application Gateway, Traffic Manager, and spoke workloads. It is designed to pair with the [Azure SRE Agent](https://sre.azure.com) (preview) so the agent can detect, investigate, and help resolve realistic networking incidents.
 
 The repository includes:
 
-- **Bicep infrastructure-as-code** for the full topology
-- **Knowledge base documents** that teach the SRE Agent about Azure networking
-- **Fault-injection scripts** to simulate real-world failures
-- **Connection Monitors & alerts** to trigger the SRE Agent automatically
+- **Bicep infrastructure-as-code** for the full topology (hub/spoke networking, VPN, NVA, Private Link, AppGW, Traffic Manager)
+- **Knowledge base documents** (13 files) that teach the SRE Agent about Azure networking
+- **Fault-injection scripts** with 26 scenarios across 6 failure categories
+- **Connection Monitors & alerts** covering 11 test groups to trigger the SRE Agent automatically
+- **Health check script** (20 validation sections) for end-to-end environment verification
+- **SRE Agent configuration artifacts** (custom agents, skills, response plans)
 
 ---
 
 ## Architecture
 
 ```
-                        ┌──────────────────────┐
-                        │    On-Prem VNet      │
-                        │    10.100.0.0/16     │
-                        │    VPN GW (BGP)      │
-                        │    Test VM           │
-                        └──────────┬───────────┘
-                       S2S VPN     │     S2S VPN
-                 ┌─────────────────┴─────────────────┐
-        ┌────────┴─────────┐              ┌──────────┴────────┐
-        │   Hub 1 VNet     │              │   Hub 2 VNet      │
-        │   10.1.0.0/16    │              │   10.2.0.0/16     │
-        │   NVA (iptables) │              │   NVA (iptables)  │
-        │   VPN GW (BGP)   │              │   VPN GW (BGP)    │
-        │   Internal LB    │              │   Internal LB     │
-        └──┬─────────────┬─┘              └──┬─────────────┬──┘
-     ┌─────┴────┐  ┌─────┴────┐         ┌────┴─────┐  ┌────┴─────┐
-     │ Spoke 11 │  │ Spoke 12 │         │ Spoke 21 │  │ Spoke 22 │
-     │ 10.11.   │  │ 10.12.   │         │ 10.21.   │  │ 10.22.   │
-     │ 0.0/16   │  │ 0.0/16   │         │ 0.0/16   │  │ 0.0/16   │
-     │ VM       │  │ VM       │         │ VM       │  │ VM       │
-     └──────────┘  └──────────┘         └──────────┘  └──────────┘
+                              ┌──────────────────────────────────┐
+                              │        On-Prem VNet              │
+                              │        10.100.0.0/16             │
+                              │   VPN GW (BGP, ASN 65100)        │
+                              │   Test VM (workload)             │
+                              └────────────┬─────────────────────┘
+                            S2S VPN (BGP)  │  S2S VPN (BGP)
+                     ┌─────────────────────┴─────────────────────────┐
+            ┌────────┴──────────────┐                  ┌─────────────┴─────────────┐
+            │      Hub 1 VNet       │     VNet         │       Hub 2 VNet          │
+            │      10.1.0.0/16      │◄───Peering──────►│       10.2.0.0/16         │
+            │                       │                  │                            │
+            │  NVA (Ubuntu+iptables)│                  │  NVA (Ubuntu+iptables)     │
+            │  Internal LB (10.1.1.200)                │  Internal LB (10.2.1.200) │
+            │  VPN GW (BGP, ASN 65001)                 │  VPN GW (BGP, ASN 65002)  │
+            │  App Gateway + WAF    │                  │                            │
+            │  Private Endpoint ────┼──► Storage Acct  │                            │
+            │    (10.1.4.4)         │    Static Website│                            │
+            └──┬──────────────┬─────┘                  └──┬──────────────┬──────────┘
+         ┌─────┴────┐   ┌─────┴────┐              ┌──────┴─────┐  ┌─────┴──────┐
+         │ Spoke 11 │   │ Spoke 12 │              │  Spoke 21  │  │  Spoke 22  │
+         │ 10.11.   │   │ 10.12.   │              │  10.21.    │  │  10.22.    │
+         │ 0.0/16   │   │ 0.0/16   │              │  0.0/16    │  │  0.0/16    │
+         │ VM+Apache│   │ VM+Apache│              │  VM+Apache │  │  VM+Apache │
+         └──────────┘   └──────────┘              └────────────┘  └────────────┘
+
+                     ┌─────────────────────────────────┐
+                     │  Traffic Manager (netsre-webapp) │
+                     │  Endpoints: Spoke VMs via AppGW  │
+                     └─────────────────────────────────┘
 ```
 
-**Key design points:**
+### Component Summary
 
-| Component | Purpose |
+| Component | Details |
 |-----------|---------|
-| On-Prem VNet + VPN GW | Simulates an on-premises data centre connected via two S2S VPN tunnels |
-| Hub 1 / Hub 2 | Transit hubs running Linux NVA firewalls behind internal load balancers |
-| Spoke VNets (×4) | Workload VNets peered to their hub, each with a test VM |
-| VPN Gateways (×3) | Site-to-site VPN with BGP for dynamic route exchange |
-| Connection Monitors | End-to-end reachability tests across every path |
-| Azure Monitor Alerts | Fire when Connection Monitor tests fail |
+| **On-Prem VNet + VPN GW** | Simulates on-premises site with BGP (ASN 65100), connected to both hubs via S2S VPN |
+| **Hub 1 / Hub 2** | Transit hubs with Ubuntu NVAs behind Standard Internal LBs; dnsmasq DNS proxy |
+| **Spoke VNets (×4)** | Workload VNets peered to their hub, each with Ubuntu VM running Apache |
+| **NVA VMs (×2)** | Ubuntu 22.04 with IP forwarding, iptables SNAT, dnsmasq; act as routers + firewalls |
+| **VPN Gateways (×3)** | VpnGw1AZ SKU with BGP for dynamic route exchange between hubs and on-prem |
+| **Application Gateway** | In Hub 1, routes external HTTP traffic to spoke VMs through the NVA |
+| **Traffic Manager** | Global DNS-based load balancing across AppGW endpoints |
+| **Storage Account + Private Endpoint** | Static website accessed via PE (10.1.4.4) in Hub 1; DNS via `privatelink.web.core.windows.net` |
+| **Private DNS Zone** | Linked to hub VNets only; spokes resolve via NVA dnsmasq → hub DNS → Private DNS Zone |
+| **Connection Monitors** | 11 test groups: spoke-to-spoke, spoke-to-onprem, internet, Traffic Manager, and Static Website PE |
+| **Azure Monitor Alerts** | Fire when Connection Monitor checks fail; trigger the SRE Agent |
+| **SRE Agent** | Deployed in same RG; autonomous mode with Azure Monitor connector |
+
+### Routing Design
+
+All traffic between spokes, between spokes and on-prem, and to the Private Endpoint traverses the NVA:
+
+- **Spoke → PE**: UDR `10.1.4.0/24 → NVA LB` on spoke subnets overrides the /32 InterfaceEndpoint system route
+- **On-prem → PE**: UDR `10.1.4.0/24 → NVA LB` on GatewaySubnet overrides the /32 system route
+- **Spoke ↔ Spoke (same hub)**: UDR on spoke WorkloadSubnet → NVA LB
+- **Spoke ↔ Spoke (cross-hub)**: NVA in local hub → VNet peering → NVA in remote hub
+- **On-prem ↔ Spoke**: VPN GW → GatewaySubnet UDR → NVA LB → spoke
+
+### DNS Design
+
+- Spoke VNets use the local NVA LB as custom DNS server (hub1 spokes → 10.1.1.200, hub2 spokes → 10.2.1.200)
+- On-prem VNet uses both NVA LBs as custom DNS servers
+- NVAs run dnsmasq, forwarding to Azure DNS (168.63.129.16)
+- Private DNS Zone `privatelink.web.core.windows.net` is linked only to hub VNets
+- Spokes resolve PE FQDNs via: VM → NVA (dnsmasq) → Azure DNS → Private DNS Zone → PE IP
 
 ---
 
@@ -54,17 +89,17 @@ The repository includes:
 
 | Requirement | Details |
 |-------------|---------|
-| **Azure subscription** | With permissions to create VNets, VPN Gateways, VMs, LBs, and Monitor resources |
+| **Azure subscription** | With permissions to create VNets, VPN Gateways, VMs, LBs, Storage, and Monitor resources |
 | **Azure CLI** | v2.50+ — [Install](https://aka.ms/install-azure-cli) |
 | **Bicep CLI** | Bundled with Azure CLI ≥ 2.20 |
-| **SSH key pair** | Recommended — `ssh-keygen -t rsa -b 4096` |
-| **Shell** | Bash (Linux / macOS / WSL) **or** PowerShell 7+ |
+| **PowerShell** | 7+ (primary scripting language for this project) |
+| **Storage Blob Data Contributor** | Required on deploying user for static website upload (`--auth-mode login`) |
 
 ---
 
 ## Quick Start
 
-```bash
+```powershell
 # 1. Clone the repo
 git clone https://github.com/erjosito/networking-sre-agent.git
 cd networking-sre-agent
@@ -72,147 +107,224 @@ cd networking-sre-agent
 # 2. Log in to Azure
 az login
 
-# 3. Deploy (defaults: eastus2, resource group netsre-rg)
-./scripts/deploy.sh
+# 3. Deploy (defaults: eastus2, resource group netsre-rg, prefix netsre)
+.\scripts\deploy.ps1
 
 # 4. Or customise the deployment
-./scripts/deploy.sh \
-    --resource-group mylab-rg \
-    --location westus2 \
-    --prefix mylab
+.\scripts\deploy.ps1 -ResourceGroup "mylab-rg" -Location "westus2" -Prefix "mylab"
 
 # 5. Wait ~30-45 minutes (VPN Gateways are the bottleneck)
 
-# 6. Verify connectivity
-./scripts/check-health.sh --resource-group netsre-rg
+# 6. Verify connectivity (all 20 sections)
+.\scripts\check-health.ps1
+
+# 7. Run specific health check sections
+.\scripts\check-health.ps1 -Sections 1,5,20
 ```
 
-**PowerShell:**
-
-```powershell
-.\scripts\deploy.ps1
-# or
-.\scripts\deploy.ps1 -ResourceGroup "mylab-rg" -Location "westus2" -Prefix "mylab"
-```
+The deployment script automatically:
+1. Deploys all Bicep infrastructure
+2. Enables the Storage Account static website
+3. Uploads `index.html` for HTTP probes
+4. Deploys connection monitors to `NetworkWatcherRG`
 
 ---
 
 ## Fault Injection
 
-Simulate real-world networking failures to exercise the SRE Agent's investigation capabilities.
+Simulate real-world networking failures to exercise the SRE Agent's investigation capabilities. Each scenario includes a `--Revert` mode to cleanly restore the environment.
 
-```bash
+```powershell
+# List all available scenarios
+.\scripts\inject-fault.ps1 -Scenario list
+
 # Inject a fault
-./scripts/inject-fault.sh --fault <scenario> --resource-group netsre-rg
+.\scripts\inject-fault.ps1 -Scenario <name>
 
-# Revert all active faults
-./scripts/revert-all.sh --resource-group netsre-rg
+# Revert a specific fault
+.\scripts\inject-fault.ps1 -Scenario <name> -Revert
+
+# Inject multiple faults simultaneously
+.\scripts\inject-fault.ps1 -Scenario multi-fault
 ```
 
-### Available Scenarios
+### Available Scenarios (26 total)
 
-| Scenario | Command | Description | Expected Impact |
-|----------|---------|-------------|-----------------|
-| **VPN Disconnect** | `vpn-disconnect` | Resets the On-Prem ↔ Hub 1 VPN connection | On-prem cannot reach Hub 1 or its spokes |
-| **NVA Failure** | `nva-stop` | Stops the NVA VM in Hub 1 | Spoke 11 / 12 lose outbound & cross-spoke connectivity |
-| **NSG Block** | `nsg-block` | Adds a Deny-All inbound rule to Spoke 11's NSG | Spoke 11 VM becomes unreachable |
-| **UDR Black-hole** | `udr-blackhole` | Points Spoke 11's default route to a non-existent next hop | All traffic from Spoke 11 is dropped |
-| **BGP Route Manipulation** | `bgp-withdraw` | Withdraws advertised routes on Hub 1 VPN GW | On-prem loses routes to Hub 1 spokes |
-| **DNS Failure** | `dns-break` | Misconfigures the custom DNS setting on Spoke 11 VNet | Name resolution fails for Spoke 11 workloads |
-| **Peering Disconnect** | `peering-disconnect` | Removes VNet peering between Hub 1 and Spoke 11 | Spoke 11 is fully isolated from Hub 1 |
-| **Firewall Rule Block** | `fw-block` | Adds an iptables DROP rule on the NVA in Hub 1 | Traffic transiting Hub 1 NVA is silently dropped |
+#### IP Forwarding (2 scenarios)
 
-### Multi-Fault Scenarios
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `ip-forwarding-hub1` | Disable NIC-level IP forwarding on Hub1 NVA | All traffic transiting Hub1 NVA is dropped |
+| `ip-forwarding-hub2` | Disable NIC-level IP forwarding on Hub2 NVA | All traffic transiting Hub2 NVA is dropped |
 
-Combine faults to create more challenging investigation scenarios:
+#### UDR — User-Defined Routes (3 scenarios)
 
-```bash
-# Simultaneous VPN + NVA failure
-./scripts/inject-fault.sh --fault vpn-disconnect --resource-group netsre-rg
-./scripts/inject-fault.sh --fault nva-stop       --resource-group netsre-rg
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `udr-wrong-nexthop` | Set incorrect next-hop IP in spoke route table | Traffic goes to non-existent appliance and is black-holed |
+| `udr-missing-route` | Remove the default route from spoke route table | Spoke loses path to NVA; traffic uses system routes |
+| `udr-detach` | Detach route table from spoke subnet | All custom routing removed; spoke uses default Azure routing |
 
-# Revert everything
-./scripts/revert-all.sh --resource-group netsre-rg
-```
+#### NSG — Network Security Groups (3 scenarios)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `nsg-block-icmp` | Add high-priority NSG rule blocking ICMP | Ping fails but TCP connectivity remains |
+| `nsg-block-all` | Add high-priority NSG rule blocking all traffic | Spoke VM becomes completely unreachable |
+| `nsg-block-ssh` | Add high-priority NSG rule blocking SSH (port 22) | SSH fails but HTTP and ICMP remain functional |
+
+#### NVA — Network Virtual Appliance (5 scenarios)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `nva-iptables-drop` | Drop all forwarded traffic via iptables on Hub1 NVA | All transit traffic silently dropped |
+| `nva-iptables-block-spoke` | Block traffic to/from a specific spoke via iptables | Targeted spoke isolated while others work |
+| `nva-os-forwarding` | Disable OS-level IP forwarding (sysctl) on Hub1 NVA | NVA stops routing despite NIC forwarding being enabled |
+| `nva-stop-ssh` | Stop the SSH service on Hub1 NVA | Management access lost but forwarding continues |
+| `nva-no-internet` | Block outbound internet traffic on NVA via iptables | Spokes lose internet; internal connectivity preserved |
+
+#### VPN / BGP (4 scenarios)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `vpn-disconnect` | Delete VPN connection between Hub1 and on-premises | On-prem loses all connectivity to Hub1 spokes |
+| `bgp-propagation` | Enable BGP route propagation on spoke route table | Spoke learns VPN routes directly, bypassing NVA |
+| `gw-disable-bgp-propagation` | Disable BGP route propagation on gateway route table | Gateway loses spoke routes; on-prem can't reach spokes |
+| `gateway-nsg` | Block VPN gateway traffic with NSG on GatewaySubnet | VPN tunnels drop; all on-prem connectivity lost |
+
+#### Peering (3 scenarios)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `peering-disconnect` | Remove VNet peering between Hub1 and Spoke11 | Spoke11 is fully isolated from hub and all other VNets |
+| `peering-no-gateway-transit` | Disable gateway transit on hub-to-spoke peering | Spoke loses VPN routes; can't reach on-prem |
+| `peering-no-use-remote-gw` | Disable 'use remote gateway' on spoke-to-hub peering | Spoke stops receiving BGP-learned routes from hub GW |
+
+#### Private Link (4 scenarios)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `pe-nsg-block` | Add NSG deny rule blocking traffic to PE subnet (10.1.4.0/24) | PE unreachable from all sources; HTTP probe fails |
+| `pe-dns-break` | Stop dnsmasq on Hub1 NVA | On-prem/spoke DNS resolution of PE FQDN fails |
+| `pe-route-missing` | Remove PE subnet UDR from spoke11 route table | Traffic bypasses NVA; may reach PE via system route |
+| `pe-dns-override` | Set spoke VNet DNS to Azure default and reboot VM | PE FQDN resolves to public IP instead of private — subtle: all other connectivity stays healthy |
+
+#### Application Gateway (1 scenario)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `appgw-probe-misconfigure` | Set AppGW health probe host to 127.0.0.1 | Backend pool becomes unhealthy; 502 errors |
+
+#### Combo (1 scenario)
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `multi-fault` | Inject multiple random faults simultaneously | Complex multi-root-cause investigation |
 
 ---
 
 ## Connection Monitors
 
-The deployment creates Connection Monitor tests that continuously verify reachability across every critical path.
+The deployment creates a comprehensive Connection Monitor with 11 test groups covering all critical paths.
 
 ### Monitored Paths
 
-| Source | Destination | Protocol | What it validates |
-|--------|-------------|----------|-------------------|
-| On-Prem VM | Spoke 11 VM | ICMP + TCP 22 | End-to-end VPN → Hub → Spoke path |
-| On-Prem VM | Spoke 21 VM | ICMP + TCP 22 | Cross-hub path via On-Prem → Hub 2 |
-| Spoke 11 VM | Spoke 12 VM | ICMP + TCP 22 | Intra-hub spoke-to-spoke via NVA |
-| Spoke 11 VM | Spoke 21 VM | ICMP + TCP 22 | Cross-hub spoke-to-spoke |
-| Hub 1 NVA | Hub 2 NVA | ICMP | Hub-to-hub NVA reachability |
+| Test Group | Source | Destination | Protocol | What it validates |
+|------------|--------|-------------|----------|-------------------|
+| `spoke11-to-spoke12` | Spoke 11 VM | Spoke 12 VM | ICMP + TCP 22 | Intra-hub spoke-to-spoke via NVA |
+| `spoke11-to-spoke21` | Spoke 11 VM | Spoke 21 VM | ICMP + TCP 22 | Cross-hub spoke-to-spoke |
+| `spoke11-to-onprem` | Spoke 11 VM | On-Prem VM | ICMP + TCP 22 | Spoke → VPN → on-prem path |
+| `spoke21-to-spoke22` | Spoke 21 VM | Spoke 22 VM | ICMP + TCP 22 | Intra-hub spoke-to-spoke (Hub 2) |
+| `spoke21-to-spoke11` | Spoke 21 VM | Spoke 11 VM | ICMP + TCP 22 | Cross-hub reverse path |
+| `spoke22-to-onprem` | Spoke 22 VM | On-Prem VM | ICMP + TCP 22 | Hub 2 spoke → VPN → on-prem |
+| `onprem-to-webapp` | On-Prem VM | Traffic Manager | HTTP 80 | End-to-end webapp via TM + AppGW |
+| `spokes-to-internet` | All Spoke VMs | ifconfig.me | HTTP 80 | Outbound internet via NVA SNAT |
+| `spoke11-to-staticweb` | Spoke 11 VM | Storage Account PE | HTTPS 443 (expect 200) | PE DNS resolution + HTTP through NVA |
+| `spoke21-to-staticweb` | Spoke 21 VM | Storage Account PE | HTTPS 443 (expect 200) | Cross-hub PE access |
+| `onprem-to-staticweb` | On-Prem VM | Storage Account PE | HTTPS 443 (expect 200) | On-prem → VPN → NVA → PE path |
 
-### Viewing Results
+### Alert Integration
 
-1. **Azure Portal** → Monitor → Connection Monitor
-2. **Azure CLI:**
-   ```bash
-   az network watcher connection-monitor list \
-       --resource-group netsre-rg \
-       --output table
-   ```
-3. **Alerts** are auto-configured to fire when any test fails for ≥ 2 consecutive checks. These alerts integrate with the SRE Agent.
+Alerts are configured to fire when Connection Monitor checks fail for ≥ 2 consecutive evaluations. Alert names use the pattern `<prefix>-cm-checks-failed`, enabling deployment isolation via the SRE Agent's `titleContains` filter.
 
 ---
 
 ## Azure SRE Agent Setup
 
-Follow these steps to connect this environment to the [Azure SRE Agent](https://sre.azure.com) (preview):
+The deployment includes Bicep templates and configuration artifacts for the SRE Agent.
 
-### 1. Access the SRE Agent
+### Automated Deployment
 
-Navigate to **https://sre.azure.com** and sign in with your Azure AD credentials.
+The SRE Agent is deployed as part of the main Bicep deployment (`infra/modules/sre-agent.bicep`):
 
-### 2. Connect Your Subscription
+- Creates the agent resource with autonomous mode and Azure Monitor connector
+- Assigns a user-assigned managed identity with Network Contributor and Reader roles
+- Configures monitoring scope to the infrastructure resource group
 
-- Go to **Settings → Data Sources**
-- Add your Azure subscription (requires at least **Reader** role)
-- The agent will discover the networking resources automatically
+### Post-Deployment Configuration
 
-### 3. Upload Knowledge Base
+Upload knowledge and configure skills using the provided artifacts:
 
-Upload the files from the `knowledge/` folder to the SRE Agent:
+```powershell
+# Upload knowledge base files
+.\scripts\upload-knowledge.ps1
 
-- Go to **Settings → Knowledge Base → Upload Files**
-- Select all `.md` files from the `knowledge/` directory
-- These documents teach the agent about Azure networking patterns and troubleshooting
-
-### 4. Create a Custom Agent
-
-- Go to **Agents → Create New Agent**
-- Name: **Network Expert**
-- Description: *Specialises in Azure hub-spoke networking, VPN, NVA, and connectivity troubleshooting*
-- Attach the uploaded knowledge files
-- Enable **Azure Monitor** as a data source
-
-### 5. Connect Alerts
-
-- Go to **Settings → Alert Integration**
-- Link the Azure Monitor Action Group created by the deployment
-- When a Connection Monitor test fails, the SRE Agent receives the alert and auto-investigates
-
-### 6. Test the Flow
-
-```bash
-# Inject a fault
-./scripts/inject-fault.sh --fault vpn-disconnect --resource-group netsre-rg
-
-# The Connection Monitor will detect the failure within ~2 minutes
-# The alert fires and the SRE Agent begins investigation
-# Check the SRE Agent dashboard for findings and remediation suggestions
-
-# Revert when done
-./scripts/revert-all.sh --resource-group netsre-rg
+# Configuration artifacts are in sre-agent-config/
 ```
+
+### Configuration Artifacts
+
+| File | Purpose |
+|------|---------|
+| `sre-agent-config/config.yaml` | Declarative manifest: knowledge files, agents, skills, response plans |
+| `sre-agent-config/custom-agents/network-expert.yaml` | Full-capability network investigation agent |
+| `sre-agent-config/custom-agents/connectivity-triage.yaml` | Fast first-responder triage agent |
+| `sre-agent-config/skills/nva-troubleshooting/SKILL.md` | NVA health check and troubleshooting playbook |
+| `sre-agent-config/skills/vpn-bgp-diagnostics/SKILL.md` | VPN tunnel and BGP diagnostics guide |
+| `sre-agent-config/skills/private-endpoint-dns/SKILL.md` | Private endpoint and DNS resolution guide |
+
+### Response Plan Flow
+
+1. Connection Monitor detects failure → Azure Monitor alert fires
+2. Alert name matches `<prefix>-cm-*` → SRE Agent response plan triggers
+3. Agent uses custom skills and knowledge base to investigate
+4. Agent reports probable root cause and suggested remediation
+
+---
+
+## Health Check Script
+
+Validate the entire environment with a comprehensive 20-section health check:
+
+```powershell
+.\scripts\check-health.ps1                    # Run all sections
+.\scripts\check-health.ps1 -Sections 1,5,20  # Run specific sections
+```
+
+### Sections
+
+| # | Section | What it validates |
+|---|---------|-------------------|
+| 1 | Resource Group | RG exists and is in expected location |
+| 2 | Virtual Networks | All 7 VNets exist with correct address spaces |
+| 3 | VNet Peering | Hub-spoke and hub-hub peering status |
+| 4 | NSGs | Network security groups attached to correct subnets |
+| 5 | Route Tables | UDRs present with correct next-hops |
+| 6 | NVA VMs | NVA VMs running, IP forwarding enabled, OS forwarding active |
+| 7 | Load Balancers | Internal LBs healthy with backend pools |
+| 8 | VPN Gateways | All 3 gateways provisioned and connected |
+| 9 | VPN Connections | S2S connections established and BGP sessions active |
+| 10 | BGP Routes | Expected prefixes learned via BGP |
+| 11 | Spoke VMs | All workload VMs running |
+| 12 | On-Prem VM | On-prem test VM running |
+| 13 | Application Gateway | AppGW healthy with backend pool |
+| 14 | Traffic Manager | TM profile enabled with healthy endpoints |
+| 15 | VM Extensions | Network Watcher extension installed on all VMs |
+| 16 | Spoke Web Apps | Apache running and serving HTTP 200 on each spoke VM |
+| 17 | Private Endpoint | PE exists, approved, correct IP and DNS zone |
+| 18 | Private DNS Zone | Zone linked to hub VNets with correct A record |
+| 19 | Connection Monitors | All test groups active and reporting |
+| 20 | Static Website DNS | DNS resolution from all VMs resolves PE FQDN to private IP; VNet DNS config correct |
 
 ---
 
@@ -220,12 +332,19 @@ Upload the files from the `knowledge/` folder to the SRE Agent:
 
 | File | Topics Covered |
 |------|----------------|
-| `knowledge/azure-networking-fundamentals.md` | VNets, subnets, NSGs, UDRs, DNS, and peering |
-| `knowledge/hub-spoke-topology.md` | Hub-spoke design patterns, transit routing, shared services |
-| `knowledge/vpn-expressroute-connectivity.md` | VPN Gateway, S2S/P2S, BGP, ExpressRoute, failover |
-| `knowledge/network-security-nva.md` | NVA patterns, iptables, Azure Firewall, load-balanced NVAs |
-| `knowledge/monitoring-troubleshooting.md` | Network Watcher, Connection Monitor, NSG flow logs, diagnostics |
-| `knowledge/common-failure-scenarios.md` | Root causes, symptoms, and remediation for common networking issues |
+| `azure-networking-fundamentals.md` | VNets, subnets, NSGs, UDRs, DNS, and peering |
+| `hub-spoke-topology.md` | Hub-spoke design patterns, transit routing, shared services |
+| `vpn-expressroute-connectivity.md` | VPN Gateway, S2S/P2S, BGP, ExpressRoute, failover |
+| `network-security-nva.md` | NVA patterns, iptables, Azure Firewall, load-balanced NVAs |
+| `monitoring-troubleshooting.md` | Network Watcher, Connection Monitor, NSG flow logs, diagnostics |
+| `common-failure-scenarios.md` | Root causes, symptoms, and remediation for common networking issues |
+| `dns-and-private-link.md` | Azure DNS, Private DNS Zones, Private Link resolution flow |
+| `load-balancing-services.md` | Azure LB, AppGW, Front Door, Traffic Manager patterns |
+| `expressroute-deep-dive.md` | ExpressRoute circuits, peering, Global Reach, failover |
+| `azure-firewall-and-ddos.md` | Azure Firewall, DDoS Protection, threat intelligence |
+| `azure-front-door.md` | Front Door routing, WAF policies, caching |
+| `virtual-wan.md` | Virtual WAN hubs, routing intent, secured hubs |
+| `13-private-link-and-dns.md` | Private Link service, endpoint creation, DNS integration patterns |
 
 ---
 
@@ -233,35 +352,53 @@ Upload the files from the `knowledge/` folder to the SRE Agent:
 
 ```
 networking-sre-agent/
-├── .gitignore
 ├── README.md
-├── knowledge/                        # SRE Agent knowledge base
+├── .gitignore
+├── knowledge/                           # SRE Agent knowledge base (13 files)
 │   ├── azure-networking-fundamentals.md
 │   ├── hub-spoke-topology.md
 │   ├── vpn-expressroute-connectivity.md
 │   ├── network-security-nva.md
 │   ├── monitoring-troubleshooting.md
-│   └── common-failure-scenarios.md
-├── infra/                            # Bicep infrastructure templates
-│   ├── main.bicep
-│   ├── main.bicepparam
+│   ├── common-failure-scenarios.md
+│   ├── dns-and-private-link.md
+│   ├── load-balancing-services.md
+│   ├── expressroute-deep-dive.md
+│   ├── azure-firewall-and-ddos.md
+│   ├── azure-front-door.md
+│   ├── virtual-wan.md
+│   └── 13-private-link-and-dns.md
+├── infra/                               # Bicep infrastructure templates
+│   ├── main.bicep                       # Top-level orchestration
+│   ├── main.bicepparam                  # Default parameters
 │   └── modules/
-│       ├── hub.bicep
-│       ├── spoke.bicep
-│       ├── onprem.bicep
-│       ├── vpn-connections.bicep
-│       ├── connection-monitors.bicep
-│       └── alerts.bicep
-├── scripts/                          # Deployment & operations
-│   ├── deploy.sh
-│   ├── deploy.ps1
-│   ├── teardown.sh
-│   ├── teardown.ps1
-│   ├── inject-fault.sh
-│   ├── inject-fault.ps1
-│   ├── revert-all.sh
-│   └── check-health.sh
-└── ref/                              # Reference material (not committed)
+│       ├── hub.bicep                    # Hub VNet, NVA, LB, route tables, NSGs
+│       ├── spoke.bicep                  # Spoke VNet, VM, peering
+│       ├── onprem.bicep                 # On-prem VNet, VPN GW, test VM
+│       ├── vpn-connections.bicep        # S2S VPN connections with BGP
+│       ├── private-link.bicep           # Storage Account, PE, DNS zone
+│       ├── appgw.bicep                  # Application Gateway + WAF
+│       ├── traffic-manager.bicep        # Traffic Manager profile
+│       ├── connection-monitors.bicep    # Network Watcher Connection Monitor
+│       ├── alerts.bicep                 # Azure Monitor alert rules
+│       ├── sre-agent.bicep              # SRE Agent resource + RBAC
+│       └── sre-agent-sub-roles.bicep    # Subscription-level role assignments
+├── scripts/                             # Deployment & operations (PowerShell)
+│   ├── deploy.ps1                       # Full deployment + post-deploy config
+│   ├── teardown.ps1                     # Resource group deletion
+│   ├── inject-fault.ps1                 # Fault injection (26 scenarios)
+│   ├── check-health.ps1                 # Environment health validation (20 sections)
+│   └── upload-knowledge.ps1             # Upload knowledge to SRE Agent
+├── sre-agent-config/                    # SRE Agent configuration artifacts
+│   ├── config.yaml                      # Declarative config manifest
+│   ├── custom-agents/
+│   │   ├── network-expert.yaml          # Full network investigation agent
+│   │   └── connectivity-triage.yaml     # Fast first-responder agent
+│   └── skills/
+│       ├── nva-troubleshooting/SKILL.md
+│       ├── vpn-bgp-diagnostics/SKILL.md
+│       └── private-endpoint-dns/SKILL.md
+└── ref/                                 # Reference material (not committed)
 ```
 
 ---
@@ -272,39 +409,41 @@ networking-sre-agent/
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| *"SkuNotAvailable"* | VM size not available in region | Change `--location` or use a different VM SKU |
-| *"QuotaExceeded"* | Subscription vCPU quota hit | Request a quota increase or use a smaller prefix |
+| *"SkuNotAvailable"* | VM size not available in region | Change `-Location` or use a different VM SKU |
+| *"QuotaExceeded"* | Subscription vCPU quota hit | Request a quota increase or use smaller VMs |
+| *"NonAzSkusNotAllowedForVPNGateway"* | Legacy non-AZ VPN SKU | Use VpnGw1AZ+ (already default in templates) |
+| *"PropertyChangeNotAllowed"* on VMs | Cannot change customData on existing VMs | Deploy changed modules individually or delete/recreate VMs |
+| *"Key based authentication is not permitted"* | Subscription policy blocks storage key auth | Static website setup is post-deployment via `--auth-mode login` |
 | Timeout after 60+ min | VPN Gateway stuck provisioning | Delete the RG and redeploy |
 
 ### VPN Gateway Status
 
-```bash
+```powershell
 # Check gateway connection status
-az network vpn-connection list \
-    --resource-group netsre-rg \
-    --output table
+az network vpn-connection list -g netsre-rg -o table
 
 # Check BGP peer status
-az network vnet-gateway list-bgp-peer-status \
-    --resource-group netsre-rg \
-    --name <gateway-name> \
-    --output table
+az network vnet-gateway list-bgp-peer-status -g netsre-rg -n netsre-hub1-vpngw -o table
 
 # Check learned routes
-az network vnet-gateway list-learned-routes \
-    --resource-group netsre-rg \
-    --name <gateway-name> \
-    --output table
+az network vnet-gateway list-learned-routes -g netsre-rg -n netsre-hub1-vpngw -o table
 ```
 
 ### Connection Monitor Not Reporting
 
 1. Verify the Network Watcher extension is installed on all VMs:
-   ```bash
-   az vm extension list --resource-group netsre-rg --vm-name <vm-name> --output table
+   ```powershell
+   az vm extension list -g netsre-rg --vm-name netsre-spoke11-vm -o table
    ```
 2. Check that Connection Monitor tests are in **Running** state
-3. Ensure NSGs allow ICMP and TCP 22 between test endpoints
+3. Ensure NSGs allow ICMP and TCP 22/80/443 between test endpoints
+
+### Private Endpoint DNS Not Resolving
+
+1. Verify VNet custom DNS points to NVA LB (not Azure default)
+2. Check dnsmasq is running on NVA: `systemctl is-active dnsmasq`
+3. Verify Private DNS Zone is linked to hub VNets
+4. Test from VM: `nslookup <storage-fqdn>` should return 10.1.4.4
 
 ---
 
@@ -314,18 +453,17 @@ az network vnet-gateway list-learned-routes \
 
 | Component | Count | Est. Monthly Cost |
 |-----------|-------|-------------------|
-| VPN Gateways (VpnGw1) | 3 | ~$420 ($140 each) |
+| VPN Gateways (VpnGw1AZ) | 3 | ~$450 ($150 each) |
 | VMs (Standard_B2ms) | 7 | ~$420 ($60 each) |
 | Load Balancers (Standard) | 2 | ~$40 |
-| Connection Monitors | 5 tests | ~$10 |
+| Application Gateway (v2) | 1 | ~$175 |
+| Storage Account (Static Website) | 1 | ~$1 |
+| Connection Monitors | 11 test groups | ~$20 |
 | VNet Peering / Data Transfer | — | ~$5–20 |
-| **Total (24/7)** | | **~$900–1,000 / month** |
+| **Total (24/7)** | | **~$1,100–1,200 / month** |
 
-```bash
+```powershell
 # Tear down when finished
-./scripts/teardown.sh --resource-group netsre-rg
-
-# PowerShell
 .\scripts\teardown.ps1 -ResourceGroup "netsre-rg"
 ```
 
