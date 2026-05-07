@@ -35,17 +35,17 @@ The repository includes:
            │  Private Endpoint (10.1.4.4) │          │                              │
            │    └─► Storage Acct Static Web          │                              │
            └──┬──────────────────┬────────┘          └──┬──────────────────┬────────┘
-        ┌─────┴─────┐     ┌─────┴─────┐          ┌─────┴─────┐     ┌─────┴─────┐
-        │ Spoke 11  │     │ Spoke 12  │          │ Spoke 21  │     │ Spoke 22  │
-        │ 10.11.    │     │ 10.12.    │          │ 10.21.    │     │ 10.22.    │
-        │ 0.0/16    │     │ 0.0/16    │          │ 0.0/16    │     │ 0.0/16    │
-        │ VM+Apache │     │ VM+Apache │          │ VM+Apache │     │ VM+Apache │
-        └───────────┘     └───────────┘          └───────────┘     └───────────┘
+        ┌─────┴─────┐      ┌─────┴─────┐          ┌─────┴─────┐      ┌─────┴─────┐
+        │ Spoke 11  │      │ Spoke 12  │          │ Spoke 21  │      │ Spoke 22  │
+        │ 10.11.    │      │ 10.12.    │          │ 10.21.    │      │ 10.22.    │
+        │ 0.0/16    │      │ 0.0/16    │          │ 0.0/16    │      │ 0.0/16    │
+        │ VM+Apache │      │ VM+Apache │          │ VM+Apache │      │ VM+Apache │
+        └───────────┘      └───────────┘          └───────────┘      └───────────┘
 
-           ┌────────────────────────────────────────────────────────────┐
-           │              Traffic Manager (netsre-webapp)                │
-           │       Endpoints: Hub1 AppGW PIP, Hub2 AppGW PIP            │
-           └────────────────────────────────────────────────────────────┘
+               ┌────────────────────────────────────────────────────────────┐
+               │              Traffic Manager (netsre-webapp)               │
+               │          Endpoints: Hub1 AppGW PIP, Hub2 AppGW PIP         │
+               └────────────────────────────────────────────────────────────┘
 ```
 
 ### Component Summary
@@ -73,7 +73,9 @@ All traffic between spokes, between spokes and on-prem, and to the Private Endpo
 - **On-prem → PE**: UDR `10.1.4.0/24 → NVA LB` on GatewaySubnet overrides the /32 system route
 - **Spoke ↔ Spoke (same hub)**: UDR on spoke WorkloadSubnet → NVA LB
 - **Spoke ↔ Spoke (cross-hub)**: NVA in local hub → VNet peering → NVA in remote hub
-- **On-prem ↔ Spoke**: VPN GW → GatewaySubnet UDR → NVA LB → spoke
+- **On-prem ↔ Spoke**: onprem VM → VPN GW → GatewaySubnet UDR → NVA LB → spoke
+- **On-prem ↔ Application**: onprem VM → Internet → Traffic Manager (DNS) → Application Gateway → spoke
+
 
 ### DNS Design
 
