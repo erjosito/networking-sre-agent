@@ -31,7 +31,7 @@ The repository includes:
             │  NVA (Ubuntu+iptables)│                  │  NVA (Ubuntu+iptables)     │
             │  Internal LB (10.1.1.200)                │  Internal LB (10.2.1.200) │
             │  VPN GW (BGP, ASN 65001)                 │  VPN GW (BGP, ASN 65002)  │
-            │  App Gateway + WAF    │                  │                            │
+            │  App Gateway + WAF    │                  │  App Gateway + WAF         │
             │  Private Endpoint ────┼──► Storage Acct  │                            │
             │    (10.1.4.4)         │    Static Website│                            │
             └──┬──────────────┬─────┘                  └──┬──────────────┬──────────┘
@@ -57,7 +57,7 @@ The repository includes:
 | **Spoke VNets (×4)** | Workload VNets peered to their hub, each with Ubuntu VM running Apache |
 | **NVA VMs (×2)** | Ubuntu 22.04 with IP forwarding, iptables SNAT, dnsmasq; act as routers + firewalls |
 | **VPN Gateways (×3)** | VpnGw1AZ SKU with BGP for dynamic route exchange between hubs and on-prem |
-| **Application Gateway** | In Hub 1, routes external HTTP traffic to spoke VMs through the NVA |
+| **Application Gateway** | One per hub; routes external HTTP traffic to spoke VMs through the NVA |
 | **Traffic Manager** | Global DNS-based load balancing across AppGW endpoints |
 | **Storage Account + Private Endpoint** | Static website accessed via PE (10.1.4.4) in Hub 1; DNS via `privatelink.web.core.windows.net` |
 | **Private DNS Zone** | Linked to hub VNets only; spokes resolve via NVA dnsmasq → hub DNS → Private DNS Zone |
@@ -456,11 +456,11 @@ az network vnet-gateway list-learned-routes -g netsre-rg -n netsre-hub1-vpngw -o
 | VPN Gateways (VpnGw1AZ) | 3 | ~$450 ($150 each) |
 | VMs (Standard_B2ms) | 7 | ~$420 ($60 each) |
 | Load Balancers (Standard) | 2 | ~$40 |
-| Application Gateway (v2) | 1 | ~$175 |
+| Application Gateway (v2) | 2 | ~$350 |
 | Storage Account (Static Website) | 1 | ~$1 |
 | Connection Monitors | 11 test groups | ~$20 |
 | VNet Peering / Data Transfer | — | ~$5–20 |
-| **Total (24/7)** | | **~$1,100–1,200 / month** |
+| **Total (24/7)** | | **~$1,300–1,400 / month** |
 
 ```powershell
 # Tear down when finished
