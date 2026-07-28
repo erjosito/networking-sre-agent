@@ -32,7 +32,7 @@ The extension therefore has two independent problems:
    over (Azure Monitor / Log Analytics), the same way Connection Monitor alerts drive it today.
 
 > **Terminology note:** the metrics protocol for legacy network gear is **SNMP** (Simple Network
-> Management Protocol), not SMTP (which is email). The rest of this document uses SNMP.
+> Management Protocol). The rest of this document uses SNMP.
 
 ---
 
