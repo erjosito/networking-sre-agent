@@ -270,31 +270,122 @@ attribute a change. Keep AAA shared secrets in **Key Vault**.
 
 ---
 
-## 5. Part D — Making it *consumable* by the SRE Agent
+## 5. Part D — Detection strategy: data-plane vs control-plane triggers
+
+The current lab triggers the SRE Agent from **data-plane symptoms**: metric alerts on Connection
+Monitor (`<prefix>-cm-checks-failed`, `-cm-test-result-fail`) fire when probes actually fail. A
+natural question when adding on-prem devices is whether to *switch* to **control-plane event**
+triggers (e.g. alert when a BGP session drops), or *keep* the data-plane model.
+
+### D1. Recommendation — keep data-plane as the primary trigger, enrich with control-plane
+
+**Recommended: keep Connection Monitor (data-plane) as the trigger, and ingest control-plane events
+as correlation signal / knowledge — not as the primary alert.** Rationale:
+
+| Dimension | Data-plane trigger (Connection Monitor) | Control-plane trigger (BGP/session-down alert) |
+|-----------|------------------------------------------|------------------------------------------------|
+| Semantics | Symptom — fires on **actual user impact** | Cause — fires on a component event |
+| False positives | Low (only real reachability loss alerts) | High — a session down on a **redundant** path has zero impact but still fires |
+| Precision of RCA | Low (says "broken", not "why") | High (points at the exact component) |
+| Device-agnostic | Yes — works for any device/topology | No — event names/formats are vendor-specific |
+| Consistency with repo | Matches all existing scenarios | New paradigm, diverges from current structure |
+| Detection latency | Probe interval (30 s+) | Near-instant |
+
+Control-plane events are **precise but noisy**: BGP going down on one of two redundant peers, or a
+session that re-converges in seconds, would fire the agent when nothing is actually broken.
+Symptom-based triggering avoids that while still catching real incidents. The control-plane events
+(syslog `%BGP-5-ADJCHANGE`, SNMP, EVPN route withdrawals) are far more valuable as the **"why"** the
+agent reads *after* a data-plane alert fires — so route them into the telemetry/knowledge pipeline
+(Parts B/C/E), and reserve control-plane **alerts** for a few narrow, high-value, impact-correlated
+cases (e.g. "all BGP peers down" ≈ guaranteed impact) rather than as the general trigger.
+
+### D2. The prerequisite — put the simulated device *in the data path*
+
+Keeping data-plane detection only works if breaking a device actually breaks forwarding that a probe
+traverses. Today's on-prem side does **not** satisfy this: traffic rides an **Azure-managed VPN
+Gateway**, so a simulated "device" isn't in the forwarding path and breaking it has no data-plane
+effect. Two ways to fix that:
+
+- **D2a. Device-in-path (simple).** Place on-prem workload VMs *behind* the simulated router
+  (FRR/VyOS/NVA) with UDRs forcing their traffic through it (mirroring how hub NVAs already work).
+  Breaking the device's forwarding / ACLs / BGP then breaks Connection Monitor probes originating
+  from those workloads. Minimal new infrastructure, reuses the existing NVA pattern.
+- **D2b. Device-owned overlay (VXLAN).** Give the simulated devices their *own* data plane via a
+  VXLAN overlay between them (next section). This is the most realistic — the "WAN" fabric is owned
+  by the devices, not by Azure — so both control-plane and data-plane faults surface as probe
+  failures.
+
+### D3. VXLAN overlay options (device-owned data plane)
+
+Building the on-prem devices as NVAs that establish **VXLAN tunnels** between each other creates a
+device-owned forwarding fabric. Workload traffic is encapsulated (VXLAN, UDP/4789) and carried
+between VTEPs; if a tunnel, VTEP, or its control plane breaks, reachability breaks — and Connection
+Monitor detects it. Three implementation tiers:
+
+- **D3a. Static VXLAN tunnels (no dynamic control plane) — simplest.**
+  Point-to-point VXLAN between VTEPs with statically configured remote VTEP IPs (Linux `ip link add
+  vxlan`, or vendor equivalent). Faults are purely data-plane (tunnel down, wrong VNI, MTU). Easy to
+  build in cloud-init and to break/revert. Lowest control-plane realism (no BGP-EVPN telemetry).
+
+- **D3b. BGP-EVPN/VXLAN on FRR (Linux VMs) — recommended balance.**
+  FRR provides **BGP-EVPN** control plane over Linux-kernel VXLAN VTEPs (bridge + `vxlan` netdev).
+  EVPN Type-2/Type-5 routes distribute MAC/IP reachability; the underlay is plain IP. Free,
+  IaC-friendly, reuses the Ubuntu-NVA pattern already in the repo. Yields **both** a real control
+  plane (EVPN sessions, MAC moves — great telemetry/audit signal) **and** a device-owned data plane
+  (VXLAN encap — data-plane faults). Faults can target either layer and both surface as probe
+  failures.
+
+- **D3c. Vendor EVPN-VXLAN fabric via Containerlab (SR Linux / cEOS) — highest fidelity.**
+  A leaf-spine EVPN-VXLAN fabric of container NOSes (see A2). Most realistic control plane and
+  telemetry, but bridging real Azure workload NICs + Connection Monitor probes through the
+  containerized data plane (macvlan/host networking) is non-trivial in Azure. Best reserved for
+  advanced demos.
+
+### D4. Azure-specific VXLAN caveats
+
+- **No IP multicast in Azure VNets.** VXLAN must use **unicast head-end replication (HER)** or
+  **BGP-EVPN** for BUM traffic — the classic multicast flood-and-learn mode will not work.
+- **MTU / fragmentation.** VXLAN adds ~50 bytes of overhead (more if the underlay also traverses the
+  IPsec VPN). Azure's effective path MTU is ~1400 bytes, so inner-workload MTU must be lowered (or
+  the encapsulated path will silently drop/fragment). This is both a required design step **and** an
+  excellent subtle, realistic fault scenario (`onprem-vxlan-mtu`).
+- **NIC IP forwarding** must be enabled on VTEP VMs (already a known NVA pattern in this repo).
+- **NSGs/UDRs see the outer packet.** With encapsulation, NSGs and IP-Flow-Verify evaluate the outer
+  UDP/4789 flow, not the inner traffic — the agent's diagnostics must reason about **outer vs inner**
+  headers. Worth capturing explicitly in the knowledge base, since it changes how effective-routes
+  and flow logs are interpreted.
+- **Underlay reachability** between VTEPs (over the VNet and/or VPN to the hubs) must exist before
+  the overlay can form — a broken underlay is itself a fault mode distinct from a broken overlay.
+
+---
+
+## 6. Part E — Making it *consumable* by the SRE Agent
 
 Getting data into Log Analytics is necessary but not sufficient — the agent needs **triggers** and
 **knowledge**:
 
-1. **Alert rules** — mirror the existing `<prefix>-cm-checks-failed` pattern. Create
-   scheduled-query (KQL) alerts over `Syslog` / SNMP / `OnPremAAA_CL` tables (e.g. "BGP neighbor
-   down", "interface error rate rising", "IPsec SA torn down", "device CPU > 90%", "config change
-   outside change window", "failed device login burst"). These fire the agent, just like Connection
-   Monitor does today. Keep the `titleContains`/prefix isolation convention so multiple deployments
-   don't cross-trigger.
+1. **Alert rules** — **keep the data-plane Connection Monitor alerts as the primary trigger** (see
+   Part D). Add scheduled-query (KQL) alerts over `Syslog` / SNMP / `OnPremAAA_CL` tables mainly as
+   **secondary/enrichment** signals (e.g. "config change outside change window", "failed device
+   login burst", "all BGP peers down"), mirroring the existing `<prefix>-cm-checks-failed` naming.
+   Keep the `titleContains`/prefix isolation convention so multiple deployments don't cross-trigger.
 2. **Knowledge base** — add a `knowledge/onprem-device-telemetry.md` (and maybe
-   `onprem-routing-frr-vyos.md` and `onprem-aaa-audit.md`) so the agent understands device syslog
-   message IDs, key SNMP OIDs, TACACS+/RADIUS accounting fields, and how on-prem BGP/IPsec relates
-   to the Azure VPN Gateway side.
+   `onprem-routing-frr-vyos.md`, `onprem-aaa-audit.md`, and `onprem-vxlan-overlay.md`) so the agent
+   understands device syslog message IDs, key SNMP OIDs, TACACS+/RADIUS accounting fields, VXLAN
+   outer-vs-inner header semantics, and how on-prem BGP/EVPN/IPsec relates to the Azure VPN Gateway
+   side.
 3. **Custom skill** — add a `sre-agent-config/skills/onprem-device-diagnostics/` skill with the
-   KQL queries and a decision tree (syslog event → SNMP counter → AAA/config audit → correlate with
-   Azure VPN Gateway `TunnelDiagnosticLog` / `RouteDiagnosticLog` and Activity Log).
-4. **Correlation story** — the *value* is cross-domain: e.g. an on-prem BGP flap (device syslog)
-   explains an Azure-side Connection Monitor failure, and the AAA command-accounting record explains
-   *why the BGP flapped*. Give the agent all three sides so it can join them.
+   KQL queries and a decision tree (data-plane alert → on-prem device syslog/SNMP → EVPN/VXLAN state
+   → AAA/config audit → correlate with Azure VPN Gateway `TunnelDiagnosticLog` / `RouteDiagnosticLog`
+   and Activity Log).
+4. **Correlation story** — the *value* is cross-domain: a data-plane Connection Monitor failure is
+   the **trigger**, an on-prem BGP/EVPN flap or VXLAN tunnel drop (device syslog/telemetry) is the
+   **why**, and the AAA command-accounting record is the **who**. Give the agent all three so it can
+   join symptom → cause → change.
 
 ---
 
-## 6. Part E — Fault injection for on-prem devices
+## 7. Part F — Fault injection for on-prem devices
 
 To keep parity with `scripts/inject-fault.ps1` (26 scenarios, each with a clean `-Revert`), add
 on-prem device scenarios such as:
@@ -310,13 +401,20 @@ on-prem device scenarios such as:
   **audit** path end-to-end).
 - `onprem-aaa-unreachable` — block the device→AAA server path → login failures / fail-open|closed
   behavior, plus a gap in the audit trail (exercises AAA availability).
+- `onprem-vxlan-tunnel-down` — tear down a VXLAN tunnel / VTEP (or misconfigure the VNI) → inner
+  workload reachability breaks → Connection Monitor fails while the underlay stays up (data-plane
+  overlay fault; requires the VXLAN topology of Part D).
+- `onprem-vxlan-mtu` — restore/raise inner MTU so VXLAN+underlay overhead causes fragmentation drops
+  → subtle, intermittent, size-dependent failures (a realistic overlay classic).
+- `onprem-evpn-session-down` — drop the BGP-EVPN control-plane session → MAC/IP routes withdrawn →
+  data-plane blackhole, with rich control-plane telemetry the agent can correlate.
 
 Each should be injectable via `az vm run-command` / config push and cleanly revertible, matching the
 repo's existing design principle of "subtle, realistic, observable, reversible."
 
 ---
 
-## 7. Additional challenges
+## 8. Additional challenges
 
 1. **AMA ≠ SNMP.** AMA collects syslog/perf-counter/text logs but has **no SNMP capability** — the
    SNMP-to-Azure gap is the real work, and needs a separate poller (Telegraf/exporter).
@@ -351,22 +449,32 @@ repo's existing design principle of "subtle, realistic, observable, reversible."
 14. **Two clocks of realism.** "On-prem in an Azure VNet over VPN" already isn't real on-prem
     (latency, NAT, MTU, provider edge). Adding a device improves device realism but not WAN realism —
     set expectations accordingly.
+15. **Data-plane detection needs the device in-path.** Symptom-based (Connection Monitor) triggering
+    only works if breaking a device breaks forwarding a probe traverses — the current VPN-Gateway
+    path does not. Requires device-in-path UDRs (D2a) or a device-owned VXLAN overlay (D2b/D3).
+16. **VXLAN in Azure.** No multicast (use HER/EVPN), ~50-byte MTU overhead (lower inner MTU),
+    NIC IP-forwarding on VTEPs, and NSG/flow-log diagnostics that see the **outer** UDP/4789 packet
+    rather than inner traffic — all complicate both setup and the agent's reasoning.
 
 ---
 
-## 8. Suggested phased approach
+## 9. Suggested phased approach
 
 1. **Phase 0 — pipeline first (A5 + syslog):** stand up the collector VM (rsyslog + AMA + DCR) and,
    optionally, synthetic telemetry. Prove syslog → Log Analytics → alert → SRE Agent end-to-end.
-2. **Phase 1 — real control plane (A1):** convert/​add an FRR or VyOS on-prem router speaking BGP to
-   both hubs; emit real syslog; add Telegraf SNMP for CPU/interface metrics.
+2. **Phase 1 — real control plane + in-path device (A1 + D2a):** convert/​add an FRR or VyOS on-prem
+   router speaking BGP to both hubs, with on-prem workloads behind it (UDRs) so data-plane detection
+   works; emit real syslog; add Telegraf SNMP for CPU/interface metrics.
 3. **Phase 2 — audit trail (AAA):** add TACACS+ (`tac_plus-ng`) to the collector, point the device's
    AAA at it, ingest command-accounting via an AMA text-log DCR, and tag config-change syslog.
 4. **Phase 3 — fault parity:** add `onprem-*` scenarios (including `onprem-unauthorized-change` and
-   `onprem-aaa-unreachable`) to `inject-fault.ps1`, knowledge docs, and a custom skill; wire KQL
-   alerts on device and audit signals.
-5. **Phase 4 — high fidelity (optional, A2):** offer a Containerlab-based multi-device on-prem
-   topology with gNMI streaming telemetry for advanced demos.
+   `onprem-aaa-unreachable`) to `inject-fault.ps1`, knowledge docs, and a custom skill; keep the
+   data-plane Connection Monitor alerts as the trigger and wire control-plane/audit signals as
+   enrichment (Part D).
+5. **Phase 4 — device-owned overlay (D3b):** build a BGP-EVPN/VXLAN fabric on FRR so both control-
+   and data-plane faults surface as probe failures; add `onprem-vxlan-*` / `onprem-evpn-*` scenarios.
+6. **Phase 5 — high fidelity (optional, A2 + D3c):** offer a Containerlab EVPN-VXLAN topology with
+   gNMI streaming telemetry for advanced demos.
 
 This delivers a working, cheap, repeatable story early (Phases 0–1) and reserves vendor-grade
-realism (A2/A3) as an opt-in.
+realism (A2/A3, D3c) as an opt-in.
