@@ -1,0 +1,93 @@
+#cloud-config
+# On-prem "network device": FRRouting router acting as the L3 gateway for the
+# on-prem LAN. Forwards LAN <-> Azure traffic (so breaking it breaks data-plane
+# probes), SNATs LAN traffic to the Internet, emits router syslog, and forwards
+# all logs to the telemetry collector.
+package_update: true
+packages:
+  - frr
+  - frr-pythontools
+  - iptables
+  - iptables-persistent
+  - snmpd
+
+write_files:
+  - path: /etc/sysctl.d/99-ip-forward.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.ipv4.ip_forward=1
+
+  # Enable the BGP daemon so the box behaves like a router (and is ready for the
+  # BGP-EVPN/VXLAN stage). No neighbors are configured in this stage.
+  - path: /etc/frr/daemons
+    owner: frr:frr
+    permissions: '0640'
+    content: |
+      zebra=yes
+      bgpd=yes
+      ospfd=no
+      ospf6d=no
+      ripd=no
+      ripngd=no
+      isisd=no
+      pimd=no
+      ldpd=no
+      nhrpd=no
+      eigrpd=no
+      babeld=no
+      sharpd=no
+      pbrd=no
+      bfdd=no
+      fabricd=no
+      vrrpd=no
+
+  - path: /etc/frr/frr.conf
+    owner: frr:frr
+    permissions: '0640'
+    content: |
+      frr version 8.1
+      frr defaults traditional
+      hostname onprem-frr
+      log syslog informational
+      service integrated-vtysh-config
+      !
+      line vty
+      !
+
+  # Forward every log to the telemetry collector over UDP/514.
+  - path: /etc/rsyslog.d/90-forward.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      *.* @COLLECTOR_IP_PLACEHOLDER:514
+
+  # SNMP agent reachable from the collector subnet for metric polling.
+  - path: /etc/snmp/snmpd.conf
+    owner: root:root
+    permissions: '0600'
+    content: |
+      agentAddress udp:161
+      rocommunity public 10.0.0.0/8
+      sysLocation onprem-frr
+      sysContact netops
+
+runcmd:
+  - sysctl -p /etc/sysctl.d/99-ip-forward.conf
+  # Stateful forwarding firewall (asymmetric routing breaks traffic, like the hub NVAs).
+  - iptables -P FORWARD DROP
+  - iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  - iptables -A FORWARD -m conntrack --ctstate NEW -j ACCEPT
+  - iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
+  # SNAT LAN traffic bound for the Internet (non-RFC1918 destinations).
+  - iptables -t nat -N INTERNET_SNAT || true
+  - iptables -t nat -A INTERNET_SNAT -d 10.0.0.0/8 -j RETURN
+  - iptables -t nat -A INTERNET_SNAT -d 172.16.0.0/12 -j RETURN
+  - iptables -t nat -A INTERNET_SNAT -d 192.168.0.0/16 -j RETURN
+  - iptables -t nat -A INTERNET_SNAT -j MASQUERADE
+  - iptables -t nat -A POSTROUTING -j INTERNET_SNAT
+  - mkdir -p /etc/iptables
+  - iptables-save > /etc/iptables/rules.v4
+  - systemctl enable --now frr
+  - systemctl enable --now snmpd
+  - systemctl restart rsyslog

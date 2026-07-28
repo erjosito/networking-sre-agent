@@ -1,0 +1,93 @@
+#cloud-config
+# On-prem telemetry collector: rsyslog server (receives device syslog on 514),
+# Azure Monitor Agent picks up the Syslog stream via its DCR, and Telegraf polls
+# SNMP and publishes to Azure Monitor custom metrics via managed identity.
+package_update: true
+packages:
+  - rsyslog
+  - snmp
+  - snmpd
+  - curl
+  - gnupg
+
+write_files:
+  # Receive remote syslog over UDP and TCP on 514. AMA (via its Syslog DCR)
+  # reads messages that flow through rsyslog and forwards them to Log Analytics.
+  - path: /etc/rsyslog.d/10-remote.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      module(load="imudp")
+      input(type="imudp" port="514")
+      module(load="imtcp")
+      input(type="imtcp" port="514")
+      # Keep a local copy of received device logs for troubleshooting.
+      template(name="RemoteHost" type="string" string="/var/log/remote/%HOSTNAME%.log")
+      if ($fromhost-ip != "127.0.0.1") then {
+        action(type="omfile" dynaFile="RemoteHost")
+      }
+
+  # Minimal SNMP agent bound to localhost so Telegraf has a target to prove the
+  # SNMP -> Azure Monitor path end-to-end (real device targets are added later).
+  - path: /etc/snmp/snmpd.conf
+    owner: root:root
+    permissions: '0600'
+    content: |
+      agentAddress udp:127.0.0.1:161
+      rocommunity public 127.0.0.1
+      sysLocation onprem-collector
+      sysContact netops
+
+  # Telegraf: SNMP input -> Azure Monitor custom metrics output.
+  # region and resource_id are auto-detected from IMDS; auth uses the VM's
+  # managed identity (needs the Monitoring Metrics Publisher role).
+  - path: /etc/telegraf/telegraf.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [agent]
+        interval = "60s"
+        flush_interval = "60s"
+        omit_hostname = false
+
+      [[outputs.azure_monitor]]
+        namespace_prefix = "onprem/"
+
+      [[inputs.snmp]]
+        agents = ["udp://127.0.0.1:161"]
+        version = 2
+        community = "public"
+        timeout = "5s"
+        retries = 1
+        # Add real device targets here in Stage 1+ (e.g. the FRR router / server).
+        [[inputs.snmp.field]]
+          name = "sysName"
+          oid = "1.3.6.1.2.1.1.5.0"
+          is_tag = true
+        [[inputs.snmp.field]]
+          name = "sysUpTime"
+          oid = "1.3.6.1.2.1.1.3.0"
+        [[inputs.snmp.table]]
+          name = "interface"
+          oid = "1.3.6.1.2.1.2.2"
+          [[inputs.snmp.table.field]]
+            name = "ifDescr"
+            oid = "1.3.6.1.2.1.2.2.1.2"
+            is_tag = true
+          [[inputs.snmp.table.field]]
+            name = "ifInOctets"
+            oid = "1.3.6.1.2.1.2.2.1.10"
+          [[inputs.snmp.table.field]]
+            name = "ifOutOctets"
+            oid = "1.3.6.1.2.1.2.2.1.16"
+
+runcmd:
+  - mkdir -p /var/log/remote
+  - systemctl enable --now rsyslog
+  - systemctl enable --now snmpd
+  # Install Telegraf from the InfluxData apt repository.
+  - curl -fsSL https://repos.influxdata.com/influxdata-archive_compat.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/influxdata.gpg
+  - echo "deb https://repos.influxdata.com/debian stable main" > /etc/apt/sources.list.d/influxdata.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y telegraf
+  - systemctl enable --now telegraf
