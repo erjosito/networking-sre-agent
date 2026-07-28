@@ -357,6 +357,51 @@ Monitor detects it. Three implementation tiers:
 - **Underlay reachability** between VTEPs (over the VNet and/or VPN to the hubs) must exist before
   the overlay can form — a broken underlay is itself a fault mode distinct from a broken overlay.
 
+### D5. Probe target placement — where the "on-prem server" lives
+
+Today all Connection Monitor **targets** are Azure VMs (spoke web apps, static web). For a
+device-fault probe to be meaningful its path must traverse the on-prem device — which can be arranged
+on the **source** side (an on-prem workload behind the device) *or* the **target** side (an on-prem
+server behind the device). Adding a **dedicated on-prem-server target behind the device** is
+recommended because it (a) models the realistic *"Azure workload → on-prem service"* call, (b) lets
+the **existing Azure spoke sources** detect on-prem-device faults without re-plumbing sources, and
+(c) enables **fault localization** — if only the on-prem-server probes fail while spoke-to-spoke
+still passes, the fault is isolated to the on-prem device. Keep the existing Azure-VM targets too;
+this is additive.
+
+Three placement options for that target:
+
+- **T1. Azure VM in a dedicated "on-prem LAN" segment behind the device — recommended.**
+  A VM in a subnet/VNet reachable only *through* the simulated device (NVA/VTEP). Force the path with
+  a **UDR** so both the forward and return path transit the device; breaking the device's forwarding/
+  overlay then breaks reachability. IaC-clean (Bicep), and — crucially — it can run the **Network
+  Watcher agent**, giving Connection Monitor **bidirectional path diagnostics** (hop-by-hop from both
+  ends).
+
+- **T2. Azure VM in a separate VNet peered to the on-prem VNet *without* gateway transit — the
+  proposed variant.** Peering the target VNet to the on-prem VNet with **Use Remote Gateways = off**
+  (and no Allow Gateway Transit toward it) denies the target an independent path via the Azure VPN
+  gateway, so it cannot be reached through gateway transit — only through the device's data path.
+  Sound and explicit, with one caveat: the gateway-transit setting alone does **not** force
+  *intra-peering* traffic through the device (Azure's system route for a peering is direct). A **UDR
+  pointing the relevant subnets at the on-prem NVA/VTEP is still required** to guarantee the device is
+  the sole hop. Net: T2 = T1 + an extra guarantee against a VPN-gateway bypass; use it when you want
+  to be certain no gateway-transit path can mask a device fault.
+
+- **T3. A host *inside* the Containerlab fabric as the target — only with D3c.**
+  A Connection Monitor destination can be **agentless** (any reachable IP/FQDN), so a Linux host
+  attached to a leaf in the EVPN-VXLAN fabric can serve as the target. This is the most natural
+  "behind the device" placement and avoids peering/UDR gymnastics — but it means the target lives
+  outside Bicep (Containerlab lifecycle), its IP must be routable from the CM source across the
+  overlay+underlay, and — being agentless — it yields **no destination-side path hops** (one-way path
+  diagnostics only). Worth it only once the D3c vendor fabric already exists; otherwise it adds a
+  second orchestration system for little gain over T1/T2.
+
+**Recommendation:** default to **T1** (or **T2** when a guaranteed no-bypass path is wanted) for the
+FRR-on-VM tiers (D3a/D3b); reserve **T3** for the Containerlab high-fidelity tier (D3c). In all
+cases, keep the existing Azure-VM targets so the agent can compare "on-prem-server fails vs Azure
+paths pass" and localize the fault.
+
 ---
 
 ## 6. Part E — Making it *consumable* by the SRE Agent
