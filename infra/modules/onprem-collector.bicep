@@ -32,7 +32,7 @@ var useSSHKey = !empty(adminPublicKey)
 var vmName = '${prefix}-onprem-collector'
 var collectorCloudInit = base64(loadTextContent('../cloud-init/collector.yaml'))
 // Monitoring Metrics Publisher (for Telegraf azure_monitor custom metrics)
-var metricsPublisherRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4751-9f7b-2dcbc1f3d86b')
+var metricsPublisherRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-01-01' = {
   name: '${prefix}-onprem-collector-nsg'

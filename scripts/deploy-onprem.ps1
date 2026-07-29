@@ -84,7 +84,7 @@ try { az account show 2>&1 | Out-Null } catch { Write-Err "Not logged in. Run 'a
 # Authentication (SSH key required; password for serial console).
 $AuthParams = @()
 if (Test-Path $SshKeyPath) {
-    $SshKeyData = Get-Content $SshKeyPath -Raw
+    $SshKeyData = (Get-Content $SshKeyPath -Raw).Trim()
     $AuthParams += "adminPublicKey=$SshKeyData"
     Write-Info "Using SSH key: $SshKeyPath"
 } else {
@@ -114,13 +114,27 @@ function Invoke-ModuleDeploy {
     param([string]$Name, [string]$Template, [string]$Scope = $ResourceGroup, [string[]]$Parameters)
     Write-Info "Deploying module '$Name'..."
     $deployName = "$Prefix-onprem-$Name-$(Get-Date -Format 'yyyyMMddHHmmss')"
-    $azArgs = @("deployment", "group", "create",
-        "--resource-group", $Scope,
-        "--template-file", $Template,
-        "--name", $deployName,
-        "--parameters") + $Parameters + @("--query", "properties.outputs", "--output", "json")
-    $out = & az @azArgs
-    if ($LASTEXITCODE -ne 0) { Write-Err "Module '$Name' deployment failed."; exit 1 }
+    # Build a parameters JSON file. Inline '--parameters key=value' breaks on any
+    # value containing spaces or '=' (most notably the SSH public key), producing
+    # a client-side parse failure that manifests as a multi-minute hang with zero
+    # deployments registered in ARM. See the azure-lab skill "Known Issues".
+    $paramObj = [ordered]@{}
+    foreach ($p in $Parameters) {
+        $idx = $p.IndexOf('=')
+        $paramObj[$p.Substring(0, $idx)] = @{ value = $p.Substring($idx + 1) }
+    }
+    $paramFile = [ordered]@{
+        '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+        contentVersion = '1.0.0.0'
+        parameters     = $paramObj
+    }
+    $tmp = Join-Path $env:TEMP "$deployName.params.json"
+    $paramFile | ConvertTo-Json -Depth 8 | Set-Content -Path $tmp -Encoding utf8
+    $out  = az deployment group create --resource-group $Scope --template-file $Template `
+        --name $deployName --parameters "@$tmp" --query "properties.outputs" --output json
+    $exit = $LASTEXITCODE
+    Remove-Item $tmp -ErrorAction SilentlyContinue
+    if ($exit -ne 0) { Write-Err "Module '$Name' deployment failed."; exit 1 }
     return ($out | ConvertFrom-Json)
 }
 
