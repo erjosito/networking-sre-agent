@@ -33,6 +33,9 @@ param logAnalyticsWorkspaceId string
 @allowed(['Stable', 'Preview'])
 param upgradeChannel string = 'Stable'
 
+@description('Default model for the agent. Use "Automatic" to let the service pick an available model in the region (avoids region-specific model availability failures).')
+param defaultModelName string = 'Automatic'
+
 // ──────────────────────────────────────────────
 // User-Assigned Managed Identity
 // ──────────────────────────────────────────────
@@ -93,7 +96,7 @@ resource sreAgent 'Microsoft.App/agents@2025-05-01-preview' = {
       }
     }
     defaultModel: {
-      name: 'gpt-5'
+      name: defaultModelName
       provider: 'MicrosoftFoundry'
     }
     upgradeChannel: upgradeChannel
