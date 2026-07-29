@@ -24,10 +24,24 @@
 .PARAMETER AdminPassword
     VM administrator password (used if no SSH key is available).
 
+.PARAMETER VpnSharedKey
+    Shared key for all site-to-site VPN connections (default: TestVpnKey2025!).
+
+.PARAMETER DeploySreAgent
+    Whether to deploy the Azure SRE Agent (default: $true). Requires an Entra
+    sponsor group (see -SreAgentSponsorGroupId).
+
+.PARAMETER SreAgentSponsorGroupId
+    Object ID of the Microsoft Entra group whose members can manage the SRE Agent.
+    Required when -DeploySreAgent is $true. If omitted, the script auto-discovers a
+    group named 'SRE'. See README > Azure SRE Agent Setup to create one.
+
 .EXAMPLE
     .\deploy.ps1
     .\deploy.ps1 -ResourceGroup "mylab-rg" -Location "westus2" -Prefix "mylab"
     .\deploy.ps1 -AdminPassword (ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force)
+    .\deploy.ps1 -DeploySreAgent $false
+    .\deploy.ps1 -SreAgentSponsorGroupId "a739e015-b648-455b-aa66-bade65761e3a"
 #>
 
 [CmdletBinding()]
@@ -37,7 +51,10 @@ param(
     [string]$Prefix        = $env:PREFIX ?? "netsre",
     [string]$SshKeyPath    = $env:SSH_KEY_PATH ?? "$HOME/.ssh/id_rsa.pub",
     [string]$AdminUsername  = $env:ADMIN_USERNAME ?? "azureuser",
-    [SecureString]$AdminPassword
+    [SecureString]$AdminPassword,
+    [string]$VpnSharedKey  = $env:VPN_SHARED_KEY ?? "TestVpnKey2025!",
+    [bool]$DeploySreAgent  = $true,
+    [string]$SreAgentSponsorGroupId = $env:SRE_AGENT_SPONSOR_GROUP_ID ?? ""
 )
 
 Set-StrictMode -Version Latest
@@ -74,10 +91,8 @@ if (-not (Test-Path $TemplateFile)) {
 }
 
 # Determine authentication method
-$AuthParams = @()
 if (Test-Path $SshKeyPath) {
-    $SshKeyData = Get-Content $SshKeyPath -Raw
-    $AuthParams += "adminPublicKey=$SshKeyData"
+    $SshKeyData = (Get-Content $SshKeyPath -Raw).Trim()
     Write-Info "Using SSH key: $SshKeyPath"
 } else {
     Write-Err "No SSH key found at $SshKeyPath."
@@ -95,7 +110,20 @@ if ([string]::IsNullOrEmpty($PlainPassword)) {
     Write-Err "A password is required for serial console access."
     exit 1
 }
-$AuthParams += "adminPassword=$PlainPassword"
+
+# Resolve the SRE Agent sponsor group (a Microsoft Entra group whose members can
+# manage the agent). If not supplied, try to auto-discover a group named 'SRE'.
+if ($DeploySreAgent -and [string]::IsNullOrEmpty($SreAgentSponsorGroupId)) {
+    Write-Info "Resolving SRE Agent sponsor group (Entra group named 'SRE')..."
+    $SreAgentSponsorGroupId = az ad group show --group "SRE" --query id -o tsv 2>$null
+    if ([string]::IsNullOrEmpty($SreAgentSponsorGroupId)) {
+        Write-Err "deploySreAgent is true but no sponsor group was found."
+        Write-Err "Create one (see README > Azure SRE Agent Setup) and pass -SreAgentSponsorGroupId <id>,"
+        Write-Err "or deploy without the agent: -DeploySreAgent `$false"
+        exit 1
+    }
+    Write-Info "Sponsor group 'SRE': $SreAgentSponsorGroupId"
+}
 
 $Subscription = az account show --query name -o tsv
 Write-Info "Subscription  : $Subscription"
@@ -119,22 +147,43 @@ Write-Info "Starting Bicep deployment (this will take a while)..."
 $DeployStart = Get-Date
 $DeploymentName = "netsre-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 
-$deployArgs = @(
-    "deployment", "group", "create",
-    "--resource-group", $ResourceGroup,
-    "--template-file", $TemplateFile,
-    "--parameters",
-        "prefix=$Prefix",
-        "adminUsername=$AdminUsername"
-) + $AuthParams + @(
-    "--name", $DeploymentName,
-    "--output", "none"
-)
+# Build a parameters FILE rather than inline `key=value` pairs. Inline parameters
+# break on values that contain spaces or `=` (most notably the SSH public key),
+# which manifests as a silent multi-minute hang or an "Unable to parse parameter"
+# error with the deployment never registering in ARM. A parameters file avoids
+# all quoting/whitespace issues.
+$ParamsFile = Join-Path ([System.IO.Path]::GetTempPath()) "netsre-deploy-params-$DeploymentName.json"
+$ParamsObj = @{
+    '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+    contentVersion = '1.0.0.0'
+    parameters     = @{
+        prefix         = @{ value = $Prefix }
+        location       = @{ value = $Location }
+        adminUsername  = @{ value = $AdminUsername }
+        adminPublicKey = @{ value = $SshKeyData }
+        adminPassword  = @{ value = $PlainPassword }
+        vpnSharedKey   = @{ value = $VpnSharedKey }
+        deploySreAgent = @{ value = $DeploySreAgent }
+    }
+}
+if ($DeploySreAgent) {
+    $ParamsObj.parameters.sreAgentSponsorGroupId = @{ value = $SreAgentSponsorGroupId }
+}
+$ParamsObj | ConvertTo-Json -Depth 10 | Out-File $ParamsFile -Encoding utf8
 
-& az @deployArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Err "Deployment failed."
-    exit 1
+try {
+    az deployment group create `
+        --resource-group $ResourceGroup `
+        --template-file $TemplateFile `
+        --parameters "@$ParamsFile" `
+        --name $DeploymentName `
+        --output none
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Deployment failed."
+        exit 1
+    }
+} finally {
+    Remove-Item $ParamsFile -ErrorAction SilentlyContinue
 }
 
 $DeployEnd = Get-Date
