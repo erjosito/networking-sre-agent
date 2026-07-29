@@ -7,6 +7,7 @@ packages:
   - rsyslog
   - snmp
   - snmpd
+  - telegraf
   - curl
   - gnupg
 
@@ -39,9 +40,14 @@ write_files:
       sysContact netops
 
   # Telegraf: SNMP input -> Azure Monitor custom metrics output.
+  # Written as a drop-in under /etc/telegraf/telegraf.d/ (which the packaged
+  # unit loads via '-config-directory') so the package's own /etc/telegraf/
+  # telegraf.conf conffile stays pristine — otherwise the apt install hits a
+  # conffile prompt, half-configures, and never creates the '_telegraf' user.
   # region and resource_id are auto-detected from IMDS; auth uses the VM's
-  # managed identity (needs the Monitoring Metrics Publisher role).
-  - path: /etc/telegraf/telegraf.conf
+  # managed identity (needs the Monitoring Metrics Publisher role). SNMP is
+  # polled from the in-path FRR router (fixed static IP 10.100.1.201).
+  - path: /etc/telegraf/telegraf.d/onprem.conf
     owner: root:root
     permissions: '0644'
     content: |
@@ -54,12 +60,11 @@ write_files:
         namespace_prefix = "onprem/"
 
       [[inputs.snmp]]
-        agents = ["udp://127.0.0.1:161"]
+        agents = ["udp://10.100.1.201:161"]
         version = 2
         community = "public"
         timeout = "5s"
         retries = 1
-        # Add real device targets here in Stage 1+ (e.g. the FRR router / server).
         [[inputs.snmp.field]]
           name = "sysName"
           oid = "1.3.6.1.2.1.1.5.0"
@@ -83,11 +88,10 @@ write_files:
 
 runcmd:
   - mkdir -p /var/log/remote
+  - mkdir -p /etc/telegraf/telegraf.d
   - systemctl enable --now rsyslog
   - systemctl enable --now snmpd
-  # Install Telegraf from the InfluxData apt repository.
-  - curl -fsSL https://repos.influxdata.com/influxdata-archive_compat.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/influxdata.gpg
-  - echo "deb https://repos.influxdata.com/debian stable main" > /etc/apt/sources.list.d/influxdata.list
-  - apt-get update
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y telegraf
-  - systemctl enable --now telegraf
+  # Telegraf is installed from the Ubuntu archive (see packages:) and reads its
+  # drop-in from /etc/telegraf/telegraf.d/. Restart to pick up onprem.conf.
+  - systemctl enable telegraf
+  - systemctl restart telegraf

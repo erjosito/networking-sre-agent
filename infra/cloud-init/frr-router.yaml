@@ -62,15 +62,19 @@ write_files:
     content: |
       *.* @COLLECTOR_IP_PLACEHOLDER:514
 
-  # SNMP agent reachable from the collector subnet for metric polling.
-  - path: /etc/snmp/snmpd.conf
+  # SNMP agent config, staged to a non-conffile path. cloud-init write_files runs
+  # BEFORE the apt install of snmpd, so writing /etc/snmp/snmpd.conf directly
+  # collides with the package conffile and the default (localhost-only) wins.
+  # Instead we stage here and copy it into place in runcmd (after install).
+  - path: /etc/snmp/snmpd.conf.onprem
     owner: root:root
     permissions: '0600'
     content: |
-      agentAddress udp:161
+      agentaddress udp:161
       rocommunity public 10.0.0.0/8
       sysLocation onprem-frr
       sysContact netops
+      sysServices 72
 
 runcmd:
   - sysctl -p /etc/sysctl.d/99-ip-forward.conf
@@ -89,5 +93,9 @@ runcmd:
   - mkdir -p /etc/iptables
   - iptables-save > /etc/iptables/rules.v4
   - systemctl enable --now frr
-  - systemctl enable --now snmpd
+  # Install our staged snmpd.conf over the package default, then (re)start so
+  # snmpd listens on all interfaces (udp:161) for the collector's Telegraf poll.
+  - install -m 0600 -o root -g root /etc/snmp/snmpd.conf.onprem /etc/snmp/snmpd.conf
+  - systemctl enable snmpd
+  - systemctl restart snmpd
   - systemctl restart rsyslog
