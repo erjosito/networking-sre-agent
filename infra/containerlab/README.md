@@ -7,6 +7,11 @@ instead of a single soft-router VM, it runs real network-OS containers wired
 together by [Containerlab](https://containerlab.dev/), giving realistic vendor
 CLIs, syslog formats and (with SR Linux) gNMI/SNMP telemetry.
 
+> **Deep dive:** [`docs/containerlab-onprem-how-it-works.md`](../../docs/containerlab-onprem-how-it-works.md)
+> explains exactly how Containerlab wires the fabric (management bridge, veth pairs,
+> namespaces) and how the eBGP control plane behaves — with **real captured command
+> output** from the running lab, plus a BGP fault demo and the LF-line-endings gotcha.
+
 ## Topology
 
 ```
