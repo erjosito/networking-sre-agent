@@ -28,9 +28,13 @@ param adminPassword string
 @description('SSH public key (preferred)')
 param adminPublicKey string
 
+@secure()
+@description('RADIUS shared secret between this router (NAS) and FreeRADIUS on the collector')
+param radiusSharedSecret string
+
 var useSSHKey = !empty(adminPublicKey)
 var vmName = '${prefix}-onprem-frr'
-var frrCloudInit = base64(replace(loadTextContent('../cloud-init/frr-router.yaml'), 'COLLECTOR_IP_PLACEHOLDER', collectorPrivateIp))
+var frrCloudInit = base64(replace(replace(loadTextContent('../cloud-init/frr-router.yaml'), 'COLLECTOR_IP_PLACEHOLDER', collectorPrivateIp), 'RADIUS_SECRET_PLACEHOLDER', radiusSharedSecret))
 
 resource nsg 'Microsoft.Network/networkSecurityGroups@2024-01-01' = {
   name: '${prefix}-onprem-frr-nsg'

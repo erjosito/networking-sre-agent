@@ -10,6 +10,10 @@ packages:
   - iptables
   - iptables-persistent
   - snmpd
+  # PAM RADIUS lets operator SSH logins on this "device" authenticate against
+  # the on-prem FreeRADIUS server (the collector), producing a central AAA
+  # audit trail — mirroring how a real router uses RADIUS/TACACS+ for AAA.
+  - libpam-radius-auth
 
 write_files:
   - path: /etc/sysctl.d/99-ip-forward.conf
@@ -76,6 +80,17 @@ write_files:
       sysContact netops
       sysServices 72
 
+  # PAM RADIUS client config, staged to a non-conffile path (write_files runs
+  # before the apt install; the real /etc/pam_radius_auth.conf is a package
+  # conffile). Format: "server[:port] shared_secret timeout". The server is the
+  # collector's static IP (10.100.1.100). RADIUS_SECRET_PLACEHOLDER is
+  # substituted by onprem-router.bicep.
+  - path: /etc/pam_radius_auth.conf.onprem
+    owner: root:root
+    permissions: '0600'
+    content: |
+      10.100.1.100 RADIUS_SECRET_PLACEHOLDER 3
+
 runcmd:
   - sysctl -p /etc/sysctl.d/99-ip-forward.conf
   # Stateful forwarding firewall (asymmetric routing breaks traffic, like the hub NVAs).
@@ -99,3 +114,15 @@ runcmd:
   - systemctl enable snmpd
   - systemctl restart snmpd
   - systemctl restart rsyslog
+  # ── PAM RADIUS (device AAA client) ─────────────────────────────────────────
+  # Install the staged pam_radius config over the package conffile, add a local
+  # 'netops-oper' account with its password LOCKED (so ONLY RADIUS can log it
+  # in), and make pam_radius the first, "sufficient" auth step for SSH. On a
+  # RADIUS Access-Accept the login succeeds; otherwise PAM falls through to the
+  # normal local stack. Keyboard-interactive auth is required for PAM prompts.
+  - install -m 0600 -o root -g root /etc/pam_radius_auth.conf.onprem /etc/pam_radius_auth.conf
+  - useradd -m -s /bin/bash netops-oper || true
+  - passwd -l netops-oper || true
+  - grep -q 'pam_radius_auth.so' /etc/pam.d/sshd || sed -i '1i auth sufficient pam_radius_auth.so' /etc/pam.d/sshd
+  - sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh

@@ -10,6 +10,10 @@ packages:
   - telegraf
   - curl
   - gnupg
+  # FreeRADIUS acts as the on-prem AAA server: network devices (the FRR router)
+  # authenticate operator logins against it, and it writes an audit trail that
+  # AMA ships to Log Analytics (OnPremAAA_CL) — see infra/modules/onprem-aaa.bicep.
+  - freeradius
 
 write_files:
   # Receive remote syslog over UDP and TCP on 514. AMA (via its Syslog DCR)
@@ -86,6 +90,38 @@ write_files:
             name = "ifOutOctets"
             oid = "1.3.6.1.2.1.2.2.1.16"
 
+  # ── FreeRADIUS (AAA server) ────────────────────────────────────────────────
+  # These files are staged to non-conffile paths and copied into place in
+  # runcmd AFTER the apt install. cloud-init write_files runs BEFORE apt, so
+  # writing a package conffile (clients.conf, the users file) directly collides
+  # with the package version and the install half-configures — the same trap
+  # that bit snmpd/telegraf. Stage-then-copy avoids it.
+
+  # RADIUS clients: localhost (for local radtest) + the FRR router as a NAS.
+  # RADIUS_SECRET_PLACEHOLDER is substituted by onprem-collector.bicep.
+  - path: /etc/freeradius/3.0/clients.onprem.conf
+    owner: root:root
+    permissions: '0640'
+    content: |
+      client localhost {
+          ipaddr = 127.0.0.1
+          secret = testing123
+      }
+      client onprem-frr {
+          ipaddr = 10.100.1.201
+          secret = RADIUS_SECRET_PLACEHOLDER
+          nastype = other
+          require_message_authenticator = no
+      }
+
+  # Operator account the devices authenticate. RADIUS_OPERPASS_PLACEHOLDER is
+  # substituted by onprem-collector.bicep. Appended to the FreeRADIUS users file.
+  - path: /etc/freeradius/3.0/authorize.onprem
+    owner: root:root
+    permissions: '0640'
+    content: |
+      netops-oper Cleartext-Password := "RADIUS_OPERPASS_PLACEHOLDER"
+
 runcmd:
   - mkdir -p /var/log/remote
   - mkdir -p /etc/telegraf/telegraf.d
@@ -95,3 +131,13 @@ runcmd:
   # drop-in from /etc/telegraf/telegraf.d/. Restart to pick up onprem.conf.
   - systemctl enable telegraf
   - systemctl restart telegraf
+  # FreeRADIUS: install our client list + operator over the package conffiles
+  # (staged above), then enable auth logging WITHOUT recording passwords. The
+  # audit trail lands in /var/log/freeradius/radius.log, which the AAA DCR tails.
+  - install -m 0640 -o root -g freerad /etc/freeradius/3.0/clients.onprem.conf /etc/freeradius/3.0/clients.conf
+  - cat /etc/freeradius/3.0/authorize.onprem >> /etc/freeradius/3.0/mods-config/files/authorize
+  - sed -i 's/^\(\s*\)auth = no/\1auth = yes/' /etc/freeradius/3.0/radiusd.conf
+  - sed -i 's/^\(\s*\)auth_badpass = .*/\1auth_badpass = no/' /etc/freeradius/3.0/radiusd.conf
+  - sed -i 's/^\(\s*\)auth_goodpass = .*/\1auth_goodpass = no/' /etc/freeradius/3.0/radiusd.conf
+  - systemctl enable freeradius
+  - systemctl restart freeradius

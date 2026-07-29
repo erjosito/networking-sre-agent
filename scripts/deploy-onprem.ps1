@@ -7,12 +7,17 @@
     Layers device-level telemetry and an in-path simulated network device onto
     the existing on-prem VNet WITHOUT modifying the core deployment.
 
-      Stage 'telemetry' : collector VM (rsyslog + Azure Monitor Agent + Telegraf)
-                          shipping syslog to the lab Log Analytics workspace and
-                          SNMP-derived custom metrics to Azure Monitor.
+      Stage 'telemetry' : collector VM (rsyslog + Azure Monitor Agent + Telegraf
+                          + FreeRADIUS) shipping syslog to the lab Log Analytics
+                          workspace and SNMP-derived custom metrics to Azure
+                          Monitor, and serving as the on-prem AAA (RADIUS) server.
       Stage 'device'    : FRR router NVA + an on-prem server target behind it
                           (UDR-forced data path) + a Connection Monitor + alerts.
-      Stage 'all'       : both of the above (default).
+                          The router authenticates operator SSH logins via RADIUS.
+      Stage 'aaa'       : AAA audit pipeline — ships the FreeRADIUS auth log into
+                          a custom OnPremAAA_CL table in Log Analytics (needs the
+                          collector from 'telemetry').
+      Stage 'all'       : telemetry + device + aaa (default).
 
     Requires the base lab (deploy.ps1) to already be deployed in the same RG.
 
@@ -26,7 +31,7 @@
     Resource naming prefix of the existing lab (default: netsre).
 
 .PARAMETER Stage
-    telemetry | device | all (default: all).
+    telemetry | device | aaa | containerlab | all (default: all).
 
 .PARAMETER AlertEmail
     Email for the on-prem alert action group (default: netops@example.com).
@@ -50,12 +55,14 @@ param(
     [string]$ResourceGroup = $env:RESOURCE_GROUP ?? "netsre-rg",
     [string]$Location      = $env:LOCATION ?? "eastus2",
     [string]$Prefix        = $env:PREFIX ?? "netsre",
-    [ValidateSet('telemetry', 'device', 'containerlab', 'all')]
+    [ValidateSet('telemetry', 'device', 'aaa', 'containerlab', 'all')]
     [string]$Stage         = "all",
     [string]$AlertEmail    = $env:ALERT_EMAIL ?? "netops@example.com",
     [string]$SshKeyPath    = $env:SSH_KEY_PATH ?? "$HOME/.ssh/id_rsa.pub",
     [string]$AdminUsername = $env:ADMIN_USERNAME ?? "azureuser",
     [SecureString]$AdminPassword,
+    [string]$RadiusSharedSecret     = $env:RADIUS_SHARED_SECRET ?? "LabRadius2026!",
+    [string]$RadiusOperatorPassword = $env:RADIUS_OPERATOR_PASSWORD ?? "OperPass2026!",
     [string]$RepoBranch    = $env:REPO_BRANCH ?? "onprem"
 )
 
@@ -140,6 +147,7 @@ function Invoke-ModuleDeploy {
 
 $doTelemetry = $Stage -in @('telemetry', 'all')
 $doDevice    = $Stage -in @('device', 'all')
+$doAaa       = $Stage -in @('aaa', 'all')
 $doClab      = $Stage -in @('containerlab')
 
 Write-Host ""
@@ -152,9 +160,10 @@ if ($doTelemetry) {
     $null = Invoke-ModuleDeploy -Name "collector" -Template (Join-Path $ModulesDir "onprem-collector.bicep") -Parameters (@(
         "location=$Location", "prefix=$Prefix",
         "subnetId=$DefaultSubnetId", "collectorPrivateIp=$CollectorIp",
-        "logAnalyticsWorkspaceId=$LawId"
+        "logAnalyticsWorkspaceId=$LawId",
+        "radiusSharedSecret=$RadiusSharedSecret", "radiusOperatorPassword=$RadiusOperatorPassword"
     ) + $AuthParams)
-    Write-Info "Collector deployed at $CollectorIp (syslog:514, AMA -> $Prefix-law)."
+    Write-Info "Collector deployed at $CollectorIp (syslog:514, AMA -> $Prefix-law, FreeRADIUS AAA)."
 }
 
 # ─── Stage 1: in-path device + target + monitoring ───────────────────────────
@@ -163,7 +172,8 @@ if ($doDevice) {
     $null = Invoke-ModuleDeploy -Name "router" -Template (Join-Path $ModulesDir "onprem-router.bicep") -Parameters (@(
         "location=$Location", "prefix=$Prefix",
         "subnetId=$DefaultSubnetId", "frrPrivateIp=$FrrIp",
-        "collectorPrivateIp=$CollectorIp"
+        "collectorPrivateIp=$CollectorIp",
+        "radiusSharedSecret=$RadiusSharedSecret"
     ) + $AuthParams)
     Write-Info "FRR router deployed at $FrrIp."
 
@@ -202,6 +212,16 @@ if ($doDevice) {
         "prefix=$Prefix", "alertEmail=$AlertEmail", "connectionMonitorId=$cmId"
     )
     Write-Info "Alerts deployed ($Prefix-onprem-cm-checks-failed)."
+}
+
+# ─── Stage 2: AAA audit pipeline (RADIUS -> Log Analytics) ────────────────────
+
+if ($doAaa) {
+    $null = Invoke-ModuleDeploy -Name "aaa" -Template (Join-Path $ModulesDir "onprem-aaa.bicep") -Parameters @(
+        "location=$Location", "prefix=$Prefix",
+        "logAnalyticsWorkspaceId=$LawId"
+    )
+    Write-Info "AAA pipeline deployed (FreeRADIUS audit log -> OnPremAAA_CL in $Prefix-law)."
 }
 
 # ─── Stage A2: Containerlab high-fidelity simulation (opt-in) ─────────────────

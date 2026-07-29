@@ -28,9 +28,17 @@ param adminPassword string
 @description('SSH public key (preferred)')
 param adminPublicKey string
 
+@secure()
+@description('RADIUS shared secret between the FRR router (NAS) and FreeRADIUS')
+param radiusSharedSecret string
+
+@secure()
+@description('Cleartext password for the RADIUS operator account (netops-oper)')
+param radiusOperatorPassword string
+
 var useSSHKey = !empty(adminPublicKey)
 var vmName = '${prefix}-onprem-collector'
-var collectorCloudInit = base64(loadTextContent('../cloud-init/collector.yaml'))
+var collectorCloudInit = base64(replace(replace(loadTextContent('../cloud-init/collector.yaml'), 'RADIUS_SECRET_PLACEHOLDER', radiusSharedSecret), 'RADIUS_OPERPASS_PLACEHOLDER', radiusOperatorPassword))
 // Monitoring Metrics Publisher (for Telegraf azure_monitor custom metrics)
 var metricsPublisherRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
 
