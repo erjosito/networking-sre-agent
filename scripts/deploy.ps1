@@ -195,6 +195,16 @@ Write-Info "Deployment completed in ~$DeployDuration minutes."
 # The deployment script (Microsoft.Resources/deploymentScripts) cannot be used
 # because subscription policies block key-based auth on storage accounts, which
 # the deployment scripts service requires internally for its own artifact storage.
+#
+# KNOWN LIMITATION (policy-locked subscriptions): if an Azure Policy forces
+# publicNetworkAccess=Disabled on storage accounts, the index.html blob upload
+# below will fail with "The request may be blocked by network rules of storage
+# account" and cannot be worked around by enabling public access (the policy
+# reverts it). The web Private Endpoint only exposes the 'web' (static-website)
+# sub-resource, NOT 'blob', so there is also no in-VNet path to upload the blob.
+# Options: (a) add a temporary 'blob' Private Endpoint, upload from a hub VM,
+# then delete it; (b) obtain a policy exemption to enable public access briefly.
+# Until index.html exists, the *-staticweb Connection Monitor probes return 404.
 
 Write-Host ""
 Write-Info "Configuring static website for Private Endpoint health probes..."
