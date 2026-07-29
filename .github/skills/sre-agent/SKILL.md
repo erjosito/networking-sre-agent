@@ -32,10 +32,15 @@ ref/                          — Reference material (gitignored, not committed)
 
 Deployment takes ~30-45 minutes (VPN Gateways are the bottleneck). The script:
 1. Creates the resource group
-2. Deploys main.bicep (all modules)
+2. Deploys main.bicep (all modules) **via a generated parameters JSON file** (never inline `key=value` — the SSH public key breaks inline parsing; see Common Issues)
 3. Enables Storage Account static website (`--auth-mode login`)
 4. Uploads index.html for HTTP probes
 5. Deploys connection monitors to NetworkWatcherRG
+
+**Required deployment inputs beyond defaults:**
+- `vpnSharedKey` — required by `main.bicep` (no default). `deploy.ps1` defaults it to `TestVpnKey2025!`.
+- SRE Agent sponsor group — a Microsoft Entra group whose members can manage the agent, passed as `sreAgentSponsorGroupId`. `deploy.ps1` auto-discovers the group named **`SRE`** (`az ad group show --group SRE`); override with `-SreAgentSponsorGroupId`, or skip the agent with `-DeploySreAgent $false`.
+- For long/unattended runs, submit with `--no-wait` so the deployment survives a disconnected shell, then poll `az deployment group list`/`... wait`. 0 registered deployments after a submit = a client-side parameter error, not a slow ARM.
 
 ### Deploy individual modules (when full redeploy fails)
 
@@ -178,6 +183,23 @@ Deployed to `NetworkWatcherRG` (not the main RG). 11 test groups:
 
 **Important**: Connection Monitor probes use the Network Watcher agent extension which resolves DNS via Azure infrastructure DNS — different from the VM's configured DNS. This means CM probes may succeed even when VM-level DNS resolution is broken.
 
+## On-Prem Networking Extension (optional add-on)
+
+Extends the lab to **on-premises networking** (device simulation, telemetry, audit, and detection). Design doc: `docs/onprem-network-simulation-and-telemetry.md`. Deployed by `scripts/deploy-onprem.ps1 -Stage telemetry|device|containerlab|all` on top of an existing lab. All pieces are **optional, independently-deployable add-on modules** (`infra/modules/onprem-*.bicep`) that never modify `main.bicep`/`onprem.bicep`.
+
+### Stages and modules
+- **Stage 0 — telemetry** (`onprem-collector.bicep`, `cloud-init/collector.yaml`): collector VM at `10.100.1.100` running rsyslog (514), snmpd, and Telegraf (SNMP → Azure Monitor custom metrics). AMA + a Syslog DCR/DCRA ship to `${prefix}-law`. Telegraf uses managed identity → needs **Monitoring Metrics Publisher** role at VM scope.
+- **Stage 1 — in-path device + detection** (`onprem-router.bicep`, `onprem-lan.bicep`, `onprem-connection-monitor.bicep`, `onprem-alerts.bicep`): FRR router-on-a-stick at `10.100.1.201`; on-prem server in a new `onprem-lan` subnet (`10.100.2.0/24`) behind it. UDRs force the data path through FRR (LAN `0/0`→FRR; GatewaySubnet `10.100.2.0/24`→FRR). CM + metric alerts detect a device fault.
+- **Stage A2 — Containerlab** (`onprem-containerlab.bicep`, `cloud-init/containerlab-host.yaml`, `infra/containerlab/`): high-fidelity option — a host VM runs Docker + Containerlab and boots a containerized fabric (2× FRR eBGP + a Linux server). Self-contained (not in the Azure data path).
+
+### Key design decisions & lessons
+- **CM sources are two Azure spokes (`spoke11` + `spoke21`), NOT the on-prem VM.** The on-prem VM sits in the `default` subnet with no UDR, so it reaches `onprem-lan` via the **direct VNet system route, bypassing FRR** → a false "pass" when FRR is broken. Spoke sources arrive via the VPN gateway → GatewaySubnet UDR → FRR, so they genuinely transit the device. Using one spoke per hub also tests both hubs and enables fault localization (on-prem-server probes fail while spoke-to-spoke still pass).
+- **Intra-VNet UDR subtlety:** a `0/0`→FRR UDR is *less specific* than the VNet `/16` system route, so server↔collector (both in `10.100.0.0/16`) stays direct; only non-VNet traffic transits FRR — intended.
+- **Subnet write serialization:** multiple `virtualNetworks/subnets` writes on the same VNet must be serialized via `dependsOn` (GatewaySubnet UDR depends on the LAN subnet) or they conflict. Re-declaring GatewaySubnet as a standalone child resource updates it in place (additive, safe).
+- **Cloud-init injection:** collector IP and repo branch are injected via `replace(loadTextContent(...), 'PLACEHOLDER', value)` then base64 — same pattern as the hub NVAs.
+- **Containerlab host** clones this repo branch on boot and runs `containerlab deploy`; a systemd unit re-deploys after reboot because clab veth links are lost. FRR runs as `kind: linux` (`quay.io/frrouting/frr`); node CLI via `docker exec -it clab-onprem-onprem-r1 vtysh`. SR Linux (`ghcr.io/nokia/srlinux`, publicly pullable) is the vendor-fidelity upgrade.
+- **Detection strategy:** keep the existing **data-plane** Connection Monitor alerts as the primary trigger; treat control-plane (BGP)/audit (AAA) signals as enrichment (design doc Part D).
+
 ## Teardown
 
 ```powershell
@@ -199,3 +221,7 @@ Also delete: SRE agent (if in separate RG), connection monitors in NetworkWatche
 | PE DNS override fault doesn't take effect | VM needs DHCP lease renewal | Reboot VM after changing VNet DNS |
 | dnsmasq running but not responding | Listening on 127.0.0.1 only | Set `listen-address=0.0.0.0` and restart |
 | CM probes succeed but VM DNS fails | NW agent uses Azure DNS directly | Not a bug — CM bypasses VNet DNS settings |
+| `az deployment group create` hangs for minutes / `Unable to parse parameter` / 0 deployments registered | Inline `--parameters key=value` breaks on values with spaces or `=` (the SSH public key) — a client-side parse failure before submission | Pass a **parameters JSON file** (`--parameters "@file.json"`); `deploy.ps1` now does this. Diagnose with `--debug` to a file; `az deployment group list` showing 0 = client-side failure |
+| Deployment fails: missing required `vpnSharedKey` | `main.bicep` requires it (no default) | `deploy.ps1 -VpnSharedKey` (default `TestVpnKey2025!`) |
+| SRE Agent deploy fails: `sreAgentSponsorGroupId` required | Agent needs a Microsoft Entra sponsor group | Use the Entra group named **`SRE`** (auto-discovered by `deploy.ps1`), pass `-SreAgentSponsorGroupId <id>`, or `-DeploySreAgent $false` |
+| `az --query "length(@)"` errors `-o was unexpected at this time` (PowerShell) | cmd mangles the `(@)` | Use `(az ... -o json | ConvertFrom-Json).Count` |

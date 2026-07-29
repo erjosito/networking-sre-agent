@@ -523,3 +523,71 @@ repo's existing design principle of "subtle, realistic, observable, reversible."
 
 This delivers a working, cheap, repeatable story early (Phases 0–1) and reserves vendor-grade
 realism (A2/A3, D3c) as an opt-in.
+
+---
+
+## 10. Implementation notes & lessons learned
+
+Concrete decisions made while building the IaC (`infra/modules/onprem-*.bicep`,
+`scripts/deploy-onprem.ps1`, `infra/containerlab/`). Captured so they are not re-derived later.
+
+### 10.1 Detection wiring
+- **Connection Monitor sources are two Azure spokes (one per hub), not the on-prem VM.** The on-prem
+  VM lives in the on-prem `default` subnet with no UDR, so it reaches the `onprem-lan` subnet via the
+  **direct intra-VNet system route and bypasses the FRR device** — which would report a false "pass"
+  when the device is broken. Spoke sources reach the on-prem server through the VPN gateway →
+  GatewaySubnet UDR → FRR, so they genuinely traverse the device. Using `spoke11` (hub1) and
+  `spoke21` (hub2) also exercises both hubs and enables fault localization (on-prem-server probes fail
+  while spoke-to-spoke probes still pass ⇒ fault is the on-prem device).
+- **Forcing the data path** uses two UDRs: LAN subnet `0.0.0.0/0` → FRR (forward) and GatewaySubnet
+  `10.100.2.0/24` → FRR (return). The hubs already route `10.100.0.0/16` → on-prem via BGP, so no hub
+  changes are needed.
+- **Intra-VNet UDR subtlety:** a `0/0` → FRR route is *less specific* than the VNet `/16` system
+  route, so on-prem-server ↔ collector traffic (both inside `10.100.0.0/16`) stays direct; only
+  non-VNet destinations transit FRR. This is intended — keep telemetry flowing even if FRR is broken.
+
+### 10.2 Non-breaking add-on structure
+- Every on-prem capability is a separate module deployed individually (mirrors the repo's existing
+  "deploy modules individually" convention); `main.bicep`/`onprem.bicep` are never modified.
+  `deploy-onprem.ps1 -Stage telemetry|device|containerlab|all` gates what is deployed.
+- **Subnet writes on a shared VNet must be serialized** with `dependsOn` (the GatewaySubnet UDR update
+  depends on the new LAN subnet) or Azure returns an `AnotherOperationInProgress`/conflict error.
+  Re-declaring `GatewaySubnet` as a standalone child resource updates it in place (additive, safe).
+- **Cloud-init parameterization** uses `replace(loadTextContent(...), 'PLACEHOLDER', value)` then
+  `base64(...)` to inject the collector IP and repo branch — the same pattern as the hub NVAs.
+
+### 10.3 Deployment mechanics (Azure CLI)
+- **Always deploy with a parameters JSON file, never inline `--parameters key=value`.** Inline
+  parameters break on any value containing spaces or `=` — most notably the **SSH public key** —
+  producing a client-side parse failure that manifests as a multi-minute *hang* (even with
+  `--no-wait`) or `Unable to parse parameter`, with **zero deployments registered** in ARM. Template
+  size is not the cause. `deploy.ps1` and `deploy-onprem.ps1` both build a parameters file.
+- **`main.bicep` requires `vpnSharedKey`** (no default; lab value `TestVpnKey2025!`) and, when
+  `deploySreAgent=true`, an **Entra sponsor group** (`sreAgentSponsorGroupId`). The sponsor group is
+  the Entra group named **`SRE`**, auto-discovered by `deploy.ps1`; deploy without the agent via
+  `-DeploySreAgent $false`.
+- For long, unattended runs submit with `--no-wait` (survives a disconnected shell) and poll
+  `az deployment group list` / `az deployment group wait`. 0 registered deployments after a submit ⇒
+  a client-side parameter error, not slow ARM. Diagnose with `--debug` redirected to a file.
+
+### 10.4 Containerlab (A2) wiring
+- FRR runs as containerlab `kind: linux` (`quay.io/frrouting/frr`) with `/etc/frr/daemons`,
+  `/etc/frr/frr.conf`, `/etc/frr/vtysh.conf` bind-mounted; zebra enables kernel IP forwarding on
+  start, so no extra sysctl is needed. Node CLI: `docker exec -it clab-onprem-onprem-r1 vtysh`.
+- The host VM installs Docker + Containerlab via cloud-init, clones this repo branch, and runs
+  `containerlab deploy` on boot; a systemd unit re-deploys after reboot (clab veth links do not
+  survive a reboot).
+- Topology is **self-contained inside the host VM** (a faithful simulation). Bridging an in-fabric
+  host to the Azure data path as a CM target is option **T3** (requires **D3c**) and is deliberately
+  out of scope for the first A2 drop — the FRR-on-VM Stage 1 (T1/T2) remains the recommended in-path
+  detection design.
+- Default images are free and account-free (FRR + `network-multitool`); **Nokia SR Linux**
+  (`ghcr.io/nokia/srlinux`, publicly pullable) is the vendor-fidelity upgrade for real gNMI/SNMP.
+
+### 10.5 Telemetry pipeline
+- Telegraf ships SNMP-derived **custom metrics** to Azure Monitor via managed identity, which requires
+  the **Monitoring Metrics Publisher** role at the collector VM scope; it auto-detects region and
+  resource ID from IMDS. SNMP inputs use numeric OIDs to avoid a MIB dependency.
+- AMA syslog uses a DCR (`Microsoft-Syslog` stream, facility/level `*`) + a DCR association scoped to
+  each VM; no DCE is needed because metrics use the Azure Monitor custom-metrics path (not the Logs
+  Ingestion API).
