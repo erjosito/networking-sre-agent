@@ -478,3 +478,63 @@ onprem-r1:
 ```
 
 See `infra/containerlab/README.md` for the SR Linux config equivalents.
+
+---
+
+## 10. Wiring into the Azure data path (T3 / D3c)
+
+As deployed, the fabric is **self-contained inside the lab-host VM** — nothing in Azure routes
+through it yet. That is deliberate: the in-path detection design for Stage 1 is FRR-on-a-VM, and
+bridging the *containerized* data plane into Azure is the advanced **T3 / D3c** option. This section
+records **how** you would wire it in and **which routing mechanism** to use — the design rationale
+lives in
+[`docs/onprem-network-simulation-and-telemetry.md`](onprem-network-simulation-and-telemetry.md) §D6.
+
+The container LAN `172.31.20.0/24` is internal to the VM (`10.100.1.5`) in the on-prem VNet, so Azure
+must (1) route that prefix toward on-prem across the VPN and (2) the on-prem VNet must steer it into
+the VM, which forwards it into the fabric. Three approaches, summarized:
+
+| Option | Azure learns the prefix via | Extra components | Azure-side fault signal |
+|--------|-----------------------------|------------------|-------------------------|
+| **A. BGP + Azure Route Server** | lab-host FRR peers ARS → VPN GW → hubs | Azure Route Server (~$290/mo, `/27` subnet) | route **withdrawal** |
+| **B. Static UDR + Local Network Gateway** | GatewaySubnet UDR + LNG prefixes | none | data-plane **blackhole** |
+| **C. DNAT on the lab host** *(recommended)* | reuses `10.100.1.5` (already BGP-advertised in `10.100.0.0/16`) | none | data-plane **blackhole** |
+
+> **⚠️ Option B caveat:** with **BGP enabled on the VPN connections** (as in this lab), Azure
+> **ignores the Local Network Gateway address space** (it only uses the LNG's BGP-peer `/32`). So the
+> LNG-static route only works if you **disable BGP** on the on-prem↔hub connections. See §D6.
+
+### Recommended recipe — Option C (DNAT), no Azure routing changes
+
+Because `10.100.1.5` is already reachable from Azure (its `/16` is advertised over the existing VPN
+BGP), you only touch the lab-host VM. Route the fabric prefix **via r1** so DNAT'd probe traffic
+crosses the eBGP session (making an r1↔r2 fault break the probe):
+
+```bash
+# On the lab-host VM (add to cloud-init):
+sysctl -w net.ipv4.ip_forward=1
+# send fabric-bound traffic through r1 (mgmt IP) so it traverses r1 --eBGP--> r2 --> host
+ip route replace 172.31.20.0/24 via 172.20.20.2
+# publish onprem-host (172.31.20.10:80) on the VM's own Azure IP
+iptables -t nat -A PREROUTING  -d 10.100.1.5 -p tcp --dport 80 -j DNAT --to-destination 172.31.20.10:80
+iptables -t nat -A POSTROUTING -d 172.31.20.10 -p tcp --dport 80 -j MASQUERADE
+```
+
+Also enable **NIC-level IP forwarding** on the VM's Azure NIC (the repo's NVAs already do this).
+Point a Connection Monitor test group at `http://10.100.1.5:80` from the `spoke11`/`spoke21` sources.
+
+```mermaid
+flowchart LR
+    P["CM source<br/>spoke11 VM"] --> NVA["hub NVA"] --> GW["hub VPN GW"]
+    GW -->|"S2S VPN + BGP<br/>(10.100.0.0/16)"| OGW["on-prem VPN GW"]
+    OGW --> VM["lab-host VM 10.100.1.5<br/>DNAT :80 → 172.31.20.10<br/>route /24 via r1"]
+    VM --> R1["FRR r1"] -->|"eBGP 65101↔65102"| R2["FRR r2"] --> H["onprem-host<br/>172.31.20.10:80"]
+    classDef az fill:#dbeafe,stroke:#1e40af,color:#0f172a;
+    classDef clab fill:#dcfce7,stroke:#166534,color:#0f172a;
+    class P,NVA,GW,OGW,VM az;
+    class R1,R2,H clab;
+```
+
+Break the fabric (`neighbor 172.31.12.2 shutdown` on r1, as in §7) and the probe to `10.100.1.5:80`
+now black-holes at r1 — a **data-plane** failure that Connection Monitor catches, driven by a **real
+control-plane** event inside the fabric. Revert with `no neighbor 172.31.12.2 shutdown`.

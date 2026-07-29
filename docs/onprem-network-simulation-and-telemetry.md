@@ -402,6 +402,44 @@ FRR-on-VM tiers (D3a/D3b); reserve **T3** for the Containerlab high-fidelity tie
 cases, keep the existing Azure-VM targets so the agent can compare "on-prem-server fails vs Azure
 paths pass" and localize the fault.
 
+### D6. Wiring the Containerlab fabric into the Azure data path
+
+The Containerlab LAN (`172.31.20.0/24`, where `onprem-host` lives) is **internal to the lab-host VM**
+(`10.100.1.5`) in the on-prem VNet — it is not an Azure VNet prefix. To make an Azure spoke →
+`onprem-host` probe traverse the FRR control plane, two things must be true: (1) Azure must route
+`172.31.20.0/24` toward on-prem across the VPN, and (2) the on-prem VNet must steer that prefix to the
+lab-host VM, which forwards it into the container fabric (`ip_forward` + a route into the fabric).
+Three ways to make Azure aware of the prefix:
+
+| Option | How Azure learns `172.31.20.0/24` | Extra components | Fault visible in Azure as | Verdict |
+|--------|-----------------------------------|------------------|---------------------------|---------|
+| **A. BGP via Azure Route Server** | Lab-host FRR BGP-peers the two ARS IPs; ARS injects the prefix into the VNet and re-advertises it to the on-prem VPN GW, which propagates it over the existing S2S BGP to the hubs | **Azure Route Server** (+ `/27` `RouteServerSubnet`, ~$290/mo) | **Route withdrawal** — an r1↔r2 BGP drop withdraws the prefix end-to-end | Most elegant/dynamic, but overkill + extra cost for one fixed /24 |
+| **B. Static: GatewaySubnet UDR + LNG prefixes** | GatewaySubnet UDR `172.31.20.0/24 → 10.100.1.5`; add `172.31.20.0/24` to each hub's **Local Network Gateway** address space | None | **Data-plane blackhole** (probe times out) — prefix stays "reachable" in Azure | Deterministic, ARS-free; **but see the BGP caveat below** |
+| **C. DNAT on the lab-host VM** | Nothing new — `10.100.1.5` is already in `10.100.0.0/16`, which the on-prem VPN GW **already advertises via BGP**. `iptables` DNAT `10.100.1.5:80 → 172.31.20.10:80`, route `172.31.20.0/24` via r1's mgmt IP so packets traverse r1→(eBGP)→r2→host | None (all in cloud-init) | **Data-plane blackhole** — same as B | **Recommended lab default** — least moving parts, still exercises the FRR eBGP control plane |
+
+> **⚠️ Critical caveat for Option B — LNG prefixes are ignored while BGP is enabled.** The lab runs
+> **BGP on the on-prem↔hub VPN connections**. When BGP is enabled on a connection, Azure uses the
+> Local Network Gateway only for the **BGP peer address** (`/32`) and **ignores its broader address
+> space** for route programming. So the LNG-static approach only takes effect if you **disable BGP on
+> those connections** and go fully static (LNG lists `10.100.0.0/16` **+** `172.31.20.0/24`). Keeping
+> VPN BGP *and* injecting the /24 dynamically requires the on-prem VPN GW to learn it — which loops
+> back to Azure Route Server (Option A). There is no "advertise an arbitrary static prefix" knob on
+> the Azure VPN Gateway short of BGP-learning it.
+
+**Fault-visibility trade-off.** With **B** or **C**, Azure always believes `172.31.20.0/24` is
+reachable, so a fabric fault (r1↔r2 BGP/link down) surfaces as a **data-plane blackhole** at the
+lab-host VM / r1 — the Connection Monitor probe simply times out. That is exactly this repo's
+data-plane detection philosophy (§D1), so it is the *desired* behavior, not a limitation. Only
+**Option A** turns a fabric control-plane fault into a **route withdrawal visible in Azure** (nice for
+a control-plane demo, at the cost of ARS).
+
+**Recommendation.** Static beats ARS for this lab. For the fewest moving parts, default to **Option C
+(DNAT)** — no ARS, no LNG/UDR/BGP surgery, all configured on the lab-host VM in cloud-init, and it
+still drives traffic through the containerlab eBGP control plane. If you specifically want Azure to
+route to **native container LAN IPs**, use **Option B with VPN BGP disabled** on the on-prem
+connections (because LNG prefixes are ignored while BGP is on). Reserve **Option A (ARS)** only when a
+genuine end-to-end BGP route-withdrawal-in-Azure is a demo requirement.
+
 ---
 
 ## 6. Part E — Making it *consumable* by the SRE Agent
