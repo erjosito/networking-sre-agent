@@ -84,6 +84,19 @@ topology:
   (every node also has eth0 on the 172.20.20.0/24 Containerlab management bridge)
 ```
 
+```mermaid
+graph LR
+    r1["<b>onprem-r1</b><br/>WAN edge · AS 65101<br/>lo 10.99.1.1"]
+    r2["<b>onprem-r2</b><br/>core · AS 65102<br/>lo 10.99.2.2<br/><i>owns + advertises LAN</i>"]
+    host["<b>onprem-host</b><br/>server · HTTP :80<br/>172.31.20.10"]
+    r1 <-->|"eBGP · transit 172.31.12.0/30<br/>.1 &nbsp;&harr;&nbsp; .2"| r2
+    r2 <-->|"LAN 172.31.20.0/24<br/>.1 &nbsp;&harr;&nbsp; .10"| host
+    classDef rtr fill:#dbeafe,stroke:#1e40af,color:#0f172a;
+    classDef srv fill:#dcfce7,stroke:#166534,color:#0f172a;
+    class r1,r2 rtr;
+    class host srv;
+```
+
 The design intent: `onprem-r2` **owns the LAN** (`172.31.20.0/24`) and advertises it into
 eBGP. `onprem-r1` only reaches the LAN **via the BGP-learned route**. So breaking the
 r1↔r2 BGP session (or the transit link) **withdraws the LAN route** — a realistic
@@ -121,6 +134,47 @@ Note the container naming convention: `clab-<labname>-<nodename>`, so `onprem-r1
 ---
 
 ## 4. How the wiring actually looks on the host
+
+Physically, every node is a network namespace on the host VM. Management (`eth0`) links
+attach to a shared Docker bridge; the point-to-point data links are `veth` pairs whose two
+ends live inside two namespaces (so they never appear on the host). The full picture:
+
+```mermaid
+graph TB
+    subgraph HOST["Lab host VM · netsre-onprem-clab (10.100.1.5)"]
+        BR["clab bridge<br/>br-e701d5b2bcfc<br/>172.20.20.0/24"]
+        subgraph NS1["netns: clab-onprem-onprem-r1"]
+            R1E0["eth0<br/>172.20.20.2"]
+            R1E1["eth1<br/>172.31.12.1/30"]
+            R1LO["lo 10.99.1.1"]
+        end
+        subgraph NS2["netns: clab-onprem-onprem-r2"]
+            R2E0["eth0<br/>172.20.20.4"]
+            R2E1["eth1<br/>172.31.12.2/30"]
+            R2E2["eth2<br/>172.31.20.1/24"]
+            R2LO["lo 10.99.2.2"]
+        end
+        subgraph NS3["netns: clab-onprem-onprem-host"]
+            HE0["eth0<br/>172.20.20.3"]
+            HE1["eth1<br/>172.31.20.10/24"]
+        end
+        BR -. "mgmt veth" .- R1E0
+        BR -. "mgmt veth" .- R2E0
+        BR -. "mgmt veth" .- HE0
+        R1E1 ===|"data veth<br/>transit /30"| R2E1
+        R2E2 ===|"data veth<br/>LAN /24"| HE1
+    end
+    classDef br fill:#fef9c3,stroke:#a16207,color:#0f172a;
+    classDef rtr fill:#dbeafe,stroke:#1e40af,color:#0f172a;
+    classDef srv fill:#dcfce7,stroke:#166534,color:#0f172a;
+    class BR br;
+    class R1E0,R1E1,R1LO,R2E0,R2E1,R2E2,R2LO rtr;
+    class HE0,HE1 srv;
+```
+
+Solid double lines are the data-plane `veth` pairs (both ends inside namespaces); dotted
+lines are the management `veth` links to the shared `clab` bridge (host-visible). The rest
+of this section proves each of these links from live command output.
 
 ### 4.1 Management network — a Docker bridge
 
@@ -306,7 +360,24 @@ hop — `onprem-r2` — to reach the host.
 ## 7. Fault demo — a control-plane failure withdraws the data path
 
 Because r1 depends on BGP for the LAN route, shutting the BGP session cleanly reproduces a
-real "WAN edge lost its route to the LAN" incident. Captured live:
+real "WAN edge lost its route to the LAN" incident. The causal chain:
+
+```mermaid
+flowchart LR
+    A["Inject:<br/>neighbor 172.31.12.2<br/>shutdown on r1"] --> B["eBGP session<br/>Established → Idle"]
+    B --> C["r2's advertisement<br/>of 172.31.20.0/24<br/>withdrawn"]
+    C --> D["route removed<br/>from r1 RIB"]
+    D --> E["r1 → host<br/>100% packet loss"]
+    E --> F["data-plane probe<br/>fails ⇒ incident"]
+    classDef inject fill:#fee2e2,stroke:#b91c1c,color:#0f172a;
+    classDef effect fill:#fef3c7,stroke:#a16207,color:#0f172a;
+    classDef outcome fill:#e0e7ff,stroke:#3730a3,color:#0f172a;
+    class A inject;
+    class B,C,D effect;
+    class E,F outcome;
+```
+
+Captured live:
 
 ```console
 # Inject: administratively shut down the eBGP neighbor on r1
