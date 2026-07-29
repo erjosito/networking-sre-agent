@@ -50,12 +50,13 @@ param(
     [string]$ResourceGroup = $env:RESOURCE_GROUP ?? "netsre-rg",
     [string]$Location      = $env:LOCATION ?? "eastus2",
     [string]$Prefix        = $env:PREFIX ?? "netsre",
-    [ValidateSet('telemetry', 'device', 'all')]
+    [ValidateSet('telemetry', 'device', 'containerlab', 'all')]
     [string]$Stage         = "all",
     [string]$AlertEmail    = $env:ALERT_EMAIL ?? "netops@example.com",
     [string]$SshKeyPath    = $env:SSH_KEY_PATH ?? "$HOME/.ssh/id_rsa.pub",
     [string]$AdminUsername = $env:ADMIN_USERNAME ?? "azureuser",
-    [SecureString]$AdminPassword
+    [SecureString]$AdminPassword,
+    [string]$RepoBranch    = $env:REPO_BRANCH ?? "onprem"
 )
 
 Set-StrictMode -Version Latest
@@ -125,6 +126,7 @@ function Invoke-ModuleDeploy {
 
 $doTelemetry = $Stage -in @('telemetry', 'all')
 $doDevice    = $Stage -in @('device', 'all')
+$doClab      = $Stage -in @('containerlab')
 
 Write-Host ""
 Write-Warn "This deploys VMs and (for 'device') a Connection Monitor. Allow several minutes."
@@ -188,6 +190,19 @@ if ($doDevice) {
     Write-Info "Alerts deployed ($Prefix-onprem-cm-checks-failed)."
 }
 
+# ─── Stage A2: Containerlab high-fidelity simulation (opt-in) ─────────────────
+
+if ($doClab) {
+    $clab = Invoke-ModuleDeploy -Name "containerlab" -Template (Join-Path $ModulesDir "onprem-containerlab.bicep") -Parameters (@(
+        "location=$Location", "prefix=$Prefix",
+        "subnetId=$DefaultSubnetId", "collectorPrivateIp=$CollectorIp",
+        "repoBranch=$RepoBranch"
+    ) + $AuthParams)
+    $clabIp = $clab.clabPrivateIp.value
+    Write-Info "Containerlab host deployed at $clabIp (Docker + Containerlab)."
+    Write-Info "Fabric auto-deploys on boot from branch '$RepoBranch' (allow a few minutes for image pulls)."
+}
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -199,6 +214,9 @@ if ($doDevice) {
     Write-Host "  FRR router     : $FrrIp"
     Write-Host "  On-prem server : behind FRR in the onprem-lan subnet (10.100.2.0/24)"
     Write-Host "  Detection      : breaking the FRR router fails '$Prefix-onprem-connection-monitor'"
+}
+if ($doClab) {
+    Write-Host "  Containerlab   : $clabIp  (2x FRR + host; SSH in and run 'sudo containerlab inspect -t /opt/networking-sre-agent/infra/containerlab/onprem.clab.yml')"
 }
 Write-Host ""
 Write-Info "Verify: KQL 'Syslog | where TimeGenerated > ago(15m) | take 20' in $Prefix-law"

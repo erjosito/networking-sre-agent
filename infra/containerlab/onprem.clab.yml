@@ -1,0 +1,58 @@
+# On-prem simulated network (Part A2 — Containerlab high-fidelity option).
+#
+# A small containerized on-prem fabric that runs inside a single Azure "lab host"
+# VM (see infra/modules/onprem-containerlab.bicep). Two FRRouting routers form an
+# eBGP control plane; a Linux host sits behind the core router as an on-prem
+# server/probe target. Breaking the r1<->r2 BGP session or link withdraws the
+# route to the host LAN — a realistic control-plane fault whose blast radius is
+# observable (host becomes unreachable from r1) exactly like a real WAN edge.
+#
+# Deploy on the host:  sudo containerlab deploy -t onprem.clab.yml
+# Inspect:             sudo containerlab inspect -t onprem.clab.yml
+# Router CLI:          docker exec -it clab-onprem-onprem-r1 vtysh
+# Destroy:             sudo containerlab destroy -t onprem.clab.yml
+#
+# Default images are free and need no vendor account (FRR + network-multitool).
+# For maximum vendor fidelity, swap the router nodes to Nokia SR Linux
+# (image: ghcr.io/nokia/srlinux, kind: nokia_srlinux) — publicly pullable — to
+# get real vendor CLI, gNMI streaming telemetry and SNMP MIBs (see README.md).
+
+name: onprem
+
+topology:
+  defaults:
+    kind: linux
+
+  nodes:
+    # WAN edge router (peers with the "core" over eBGP).
+    onprem-r1:
+      image: quay.io/frrouting/frr:9.1.0
+      binds:
+        - configs/r1/daemons:/etc/frr/daemons
+        - configs/r1/frr.conf:/etc/frr/frr.conf
+        - configs/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - ip link set dev eth1 up
+
+    # Core router (owns the on-prem LAN, advertises it into BGP).
+    onprem-r2:
+      image: quay.io/frrouting/frr:9.1.0
+      binds:
+        - configs/r2/daemons:/etc/frr/daemons
+        - configs/r2/frr.conf:/etc/frr/frr.conf
+        - configs/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - ip link set dev eth1 up
+        - ip link set dev eth2 up
+
+    # On-prem server / probe target behind the core router (serves HTTP on :80).
+    onprem-host:
+      image: wbitt/network-multitool:latest
+      exec:
+        - ip addr add 172.31.20.10/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace default via 172.31.20.1
+
+  links:
+    - endpoints: ["onprem-r1:eth1", "onprem-r2:eth1"]   # 172.31.12.0/30 transit
+    - endpoints: ["onprem-r2:eth2", "onprem-host:eth1"] # 172.31.20.0/24 LAN

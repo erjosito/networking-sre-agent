@@ -1,0 +1,76 @@
+#cloud-config
+# On-prem simulated network host (Part A2 — Containerlab).
+# Installs Docker + Containerlab, then deploys the containerized on-prem fabric
+# (two FRR routers + a Linux server) defined in infra/containerlab/onprem.clab.yml.
+# Host-level syslog is forwarded to the telemetry collector; per-node telemetry
+# (FRR syslog / SR Linux gNMI) is available via `docker logs` / gNMI (see README).
+package_update: true
+packages:
+  - docker.io
+  - git
+  - curl
+  - rsyslog
+  - snmpd
+
+write_files:
+  # Forward host syslog (Docker/containerlab lifecycle events) to the collector.
+  - path: /etc/rsyslog.d/90-forward.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      *.* @COLLECTOR_IP_PLACEHOLDER:514
+
+  - path: /etc/snmp/snmpd.conf
+    owner: root:root
+    permissions: '0600'
+    content: |
+      agentAddress udp:161
+      rocommunity public 10.0.0.0/8
+      sysLocation onprem-clab-host
+      sysContact netops
+
+  # Idempotent (re)deploy helper so the fabric can be rebuilt after a reboot.
+  - path: /usr/local/bin/onprem-clab-up.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      REPO_URL="https://github.com/erjosito/networking-sre-agent.git"
+      REPO_BRANCH="REPO_BRANCH_PLACEHOLDER"
+      SRC="/opt/networking-sre-agent"
+      if [ ! -d "$SRC/.git" ]; then
+        git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$SRC"
+      else
+        git -C "$SRC" fetch --depth 1 origin "$REPO_BRANCH" && git -C "$SRC" reset --hard "origin/$REPO_BRANCH"
+      fi
+      cd "$SRC/infra/containerlab"
+      containerlab deploy -t onprem.clab.yml --reconfigure
+
+  # Rebuild the fabric on every boot (containerlab links are lost across reboots).
+  - path: /etc/systemd/system/onprem-clab.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Deploy on-prem Containerlab fabric
+      After=docker.service network-online.target
+      Requires=docker.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/bin/onprem-clab-up.sh
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker azureuser || true
+  - bash -c "$(curl -sL https://get.containerlab.dev)"
+  - systemctl enable --now snmpd
+  - systemctl restart rsyslog
+  - systemctl daemon-reload
+  - systemctl enable --now onprem-clab.service
