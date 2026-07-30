@@ -251,6 +251,66 @@ foreach ($t in $cfg.scheduledTasks) {
     Write-Todo "$($t.name)  [schedule: $($t.schedule)  autonomy: $($t.autonomy)]"
 }
 
+# ── Working-agent readiness (detect → investigate → root-cause → fix) ─────────
+# These are the prerequisites that, if missing, silently break the incident loop.
+# The agent detects incidents by SCANNING the Azure Monitor Alerts API every ~1 min
+# with its managed identity (no action-group targeting needed) — see
+# https://learn.microsoft.com/azure/sre-agent/azure-monitor-alerts
+Write-Head "Working-agent readiness"
+$subId = ($agentId -split '/')[2]
+$uami  = $props.actionConfiguration.identity
+$prin  = $null
+if ($uami) { $prin = az identity show --ids $uami --query principalId -o tsv 2>$null }
+
+# DETECT 1/3 — incident platform connected
+if ($curIncident -and $curIncident.type -eq $IncidentPlatform) {
+    Write-Ok "Detect: incident platform = $IncidentPlatform (control plane set)"
+} else {
+    Write-Miss "Detect: incident platform not set to $IncidentPlatform — re-run with -Apply"
+}
+# DETECT 2/3 — Monitoring Contributor on the SUBSCRIPTION (required to scan alerts)
+if ($prin) {
+    $mc = az role assignment list --assignee $prin --scope "/subscriptions/$subId" --include-inherited --query "[?roleDefinitionName=='Monitoring Contributor'] | [0].id" -o tsv 2>$null
+    if ($mc) { Write-Ok "Detect: identity has 'Monitoring Contributor' on the subscription" }
+    else     { Write-Miss "Detect: identity MISSING 'Monitoring Contributor' on the subscription — alerts will NOT be scanned. Deploy modules/sre-agent-sub-roles.bicep" }
+} else { Write-Info2 "Detect: could not resolve the managed-identity principal to check the subscription role." }
+# DETECT 3/3 — alert rules exist and are enabled (parse JSON in PS to avoid JMESPath quoting issues)
+$alertsJson = az monitor metrics alert list -g $ResourceGroup -o json 2>$null | ConvertFrom-Json
+$alertNum = @($alertsJson | Where-Object { $_.enabled }).Count
+if ($alertNum -gt 0) { Write-Ok "Detect: $alertNum enabled metric alert rule(s) in $ResourceGroup" }
+else { Write-Miss "Detect: no enabled alert rules in $ResourceGroup — nothing will fire. Deploy modules/alerts.bicep" }
+
+# INVESTIGATE — read access to logs/metrics + ability to run commands
+if ($prin) {
+    $invRoles = az role assignment list --assignee $prin --all --query "[?roleDefinitionName=='Reader' || roleDefinitionName=='Log Analytics Reader' || roleDefinitionName=='Contributor' || roleDefinitionName=='Network Contributor'].roleDefinitionName" -o tsv 2>$null
+    $invSet = @($invRoles) -join ', '
+    if ($invRoles -match 'Reader') { Write-Ok "Investigate: read RBAC present ($invSet)" }
+    else { Write-Miss "Investigate: identity lacks Reader/Log Analytics Reader — cannot query telemetry" }
+}
+Write-Info2 "Investigate: knowledge base — $($cfg.knowledge.Count) file(s); run with -Apply to (re)upload+index."
+
+# ROOT-CAUSE / FIX — autonomy + write access
+$mode = $props.actionConfiguration.mode
+$acc  = $props.actionConfiguration.accessLevel
+if ($acc -eq 'High') { Write-Ok "Fix: accessLevel=High (Contributor) — agent CAN remediate" }
+else { Write-Todo "Fix: accessLevel=$acc — agent can investigate but not change resources (set accessLevel=High to remediate)" }
+if ($mode -eq 'Autonomous') { Write-Ok "Fix: mode=Autonomous — agent applies fixes without approval" }
+else { Write-Todo "Fix: mode=$mode — agent PROPOSES fixes and waits for approval (set mode=Autonomous for hands-off remediation)" }
+
+Write-Host @"
+
+  REQUIRED PORTAL STEP for a closed loop — Incident response plan(s):
+    Without at least one response plan the agent will NOT auto-act on incidents.
+    In https://sre.azure.com (Builder > Incident response plans) create a plan that
+    routes the severities you care about to a custom agent with the chosen autonomy.
+    Manifest declares $($cfg.responsePlans.Count): $((($cfg.responsePlans | ForEach-Object { $_.name }) -join ', ')).
+    Docs: https://learn.microsoft.com/azure/sre-agent/incident-response-plans
+  OPTIONAL PORTAL STEPS (improve investigation quality):
+    * Custom (sub)agents — $($cfg.customAgents.Count) declared (network-expert, connectivity-triage).
+    * Connectors (data sources, e.g. Azure Monitor logs) — Builder > Connectors.
+    * Confirm 'Builder > Incident platform' shows Azure Monitor connected + Save.
+"@ -ForegroundColor Gray
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 Write-Head "Summary"
 if ($issues -gt 0) {

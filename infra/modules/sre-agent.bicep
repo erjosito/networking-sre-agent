@@ -2,9 +2,18 @@
 // Deploys: User-assigned managed identity, Application Insights,
 //          SRE Agent (Microsoft.App/agents), and RBAC role assignments.
 //
-// NOTE: Knowledge base files (from knowledge/ directory) must be uploaded
-//       via the SRE Agent portal after deployment — Bicep cannot upload them.
-//       Azure Monitor is the default incident platform and is auto-connected.
+// NOTE: Knowledge base files (from knowledge/ directory) and data-plane objects
+//       (custom agents, skills, response plans) are NOT set here. Run
+//       scripts/configure-sre-agent.ps1 -Apply after deployment (deploy.ps1 does
+//       this automatically) to connect Azure Monitor as the incident platform and
+//       upload/index the knowledge base. Incident response plans remain a portal step.
+//
+// INCIDENT DETECTION REQUIRES (see azure-monitor-alerts docs):
+//   1. incidentManagementConfiguration.type=AzMonitor  (set by configure-sre-agent.ps1)
+//   2. Monitoring Contributor on the SUBSCRIPTION        (modules/sre-agent-sub-roles.bicep)
+//   3. Azure Monitor alert rules that actually fire      (modules/alerts.bicep)
+// The agent scans the Azure Monitor Alerts API every ~1 min with its managed
+// identity; no action-group targeting is needed.
 
 @description('Azure region for the SRE Agent. Verified working in eastus2 and canadacentral. NOTE: do NOT set an agentIdentity/initialSponsorGroupId — creating agent identities is gated per-tenant and was the original deployment blocker; this module uses a SystemAssigned + UserAssigned identity instead.')
 param location string

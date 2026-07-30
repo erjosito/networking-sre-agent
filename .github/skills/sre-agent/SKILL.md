@@ -167,11 +167,40 @@ The agent's config spans two planes. The **GA `2026-01-01` ARM API** and the
 - `scripts/configure-sre-agent.ps1 -Apply` **applies** the automatable config: ARM PATCH for `incidentManagementConfiguration.type=AzMonitor` + `knowledgeGraphConfiguration.managedResources=[<rg>]`, then uploads + indexes every `knowledge:` file from `config.yaml`. Without `-Apply` it is read-only (validate + report + portal checklist). Requires Python + PyYAML. **`deploy.ps1` now calls it with `-Apply` automatically** (post-deployment, gated by `-DeploySreAgent`), so a fresh provision leaves Azure Monitor connected + the knowledge base indexed.
 - **Caveat — portal "incident platform" view:** setting `incidentManagementConfiguration.type=AzMonitor` via ARM is confirmed in the resource, but the `sre.azure.com` portal's incident-platform panel may still render as "not connected" (it appears to read/wire additional data-plane state / an action-group the portal provisions). Alert-driven flow via `managedResources` still works; complete the portal "Connect" step if the panel matters.
 
+### What makes a "working" agent (detect → investigate → root-cause → fix)
+The full incident loop needs all of the following. `scripts/configure-sre-agent.ps1`
+prints a **Working-agent readiness** section that checks the automatable ones.
+
+| Stage | Requirement | Where / how | Automated? |
+|-------|-------------|-------------|------------|
+| **Detect** | Incident platform = Azure Monitor | `incidentManagementConfiguration.type=AzMonitor` | ✅ `configure-sre-agent.ps1 -Apply` |
+| **Detect** | Managed identity has **Monitoring Contributor on the SUBSCRIPTION** | `modules/sre-agent-sub-roles.bicep` | ✅ bicep |
+| **Detect** | Alert rules that actually fire | `modules/alerts.bicep` (metric alerts on Connection Monitors) | ✅ bicep |
+| **Detect** | Agent scoped to the resources | `knowledgeGraphConfiguration.managedResources=[<rg>]` | ✅ script/bicep |
+| **Investigate** | Read telemetry (logs/metrics) | Reader + Log Analytics Reader + Monitoring Reader on RG | ✅ bicep |
+| **Investigate** | Run diagnostics (`az`, `az vm run-command`) | Contributor (accessLevel=High) | ✅ bicep |
+| **Investigate** | Domain context | Knowledge base (17 files) | ✅ `-Apply` (agentmemory) |
+| **Root-cause** | Route incident to the right expert | **Incident response plan** (Builder > Incident response plans) | ❌ **portal-only, REQUIRED** |
+| **Fix** | Write access | Contributor + Network Contributor | ✅ bicep |
+| **Fix** | Autonomy | `mode=Review` (propose+approve) or `Autonomous` (hands-off) — `sreAgentMode` param | ✅ bicep param |
+
+**How detection actually works:** the agent **scans the Azure Monitor Alerts API every ~1 min**
+with its managed identity (needs Monitoring Contributor on the subscription) — it does
+**not** need an action group pointed at it. The action group in `alerts.bicep` is only for
+human email. Scanner facts: 250 alerts/call, 1-day initial lookback, repeated firings of the
+same rule merge into one thread, status re-syncs every 5 min. Docs: `learn.microsoft.com/azure/sre-agent/azure-monitor-alerts`.
+
+**The one thing that still blocks the closed loop:** at least one **incident response plan**
+(portal-only). Without it the agent detects+opens threads but does not auto-route/act. The
+plans are declared in `config.yaml` (`connectivity-failure`, `latency-degradation`); create
+them in `sre.azure.com` (Builder > Incident response plans) mapping severity → custom agent →
+autonomy. Docs: `learn.microsoft.com/azure/sre-agent/incident-response-plans`.
+
 ### Agent resource
-- API: `Microsoft.App/agents@2025-05-01-preview`
-- Mode: Autonomous, Access: High, Model: Automatic
-- Has Azure Monitor connector for alert integration
-- Managed identity with Network Contributor + Reader on the infrastructure RG
+- API: `Microsoft.App/agents@2025-05-01-preview` (bicep); GA `2026-01-01` used by `configure-sre-agent.ps1`
+- Mode: **Review** (default, `sreAgentMode` param — proposes fixes, waits for approval; set `Autonomous` for hands-off), Access: **High** (Contributor), Model: Automatic
+- Incident platform Azure Monitor is set post-deploy by `configure-sre-agent.ps1 -Apply` (NOT auto-connected)
+- Managed identity: Reader + Log Analytics Reader + Monitoring Reader + Contributor + Network Contributor on the RG, and **Monitoring Contributor on the subscription** (for alert scanning)
 
 ### Response plan isolation
 - Alert names use pattern `<prefix>-cm-checks-failed`
