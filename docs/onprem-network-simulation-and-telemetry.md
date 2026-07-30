@@ -623,6 +623,12 @@ Concrete decisions made while building the IaC (`infra/modules/onprem-*.bicep`,
   (`ghcr.io/nokia/srlinux`, publicly pullable) is the vendor-fidelity upgrade for real gNMI/SNMP.
 
 ### 10.5 Telemetry pipeline
+
+> **Detailed how-it-works:** for the full end-to-end walkthrough of all three
+> pipelines (syslog, SNMP metrics, RADIUS AAA) — device config through Azure
+> Monitor DCE/DCRs, plus how the SRE Agent consumes the data and runs commands on
+> devices — see [On-prem telemetry pipelines — how it works](./onprem-telemetry-pipelines-how-it-works.md).
+
 - Telegraf ships SNMP-derived **custom metrics** to Azure Monitor via managed identity, which requires
   the **Monitoring Metrics Publisher** role at the collector VM scope; it auto-detects region and
   resource ID from IMDS. SNMP inputs use numeric OIDs to avoid a MIB dependency.
