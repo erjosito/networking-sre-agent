@@ -598,6 +598,35 @@ line-of-sight** to the device, and the device must **authenticate and authorize*
 whoever shows up. That is where RADIUS **authentication (+ authorization)** — not
 just the accounting/audit trail of §3 — becomes necessary.
 
+> **What is the "executor"?** *Executor* is this document's term (**not** an Azure
+> product concept) for **the compute inside the on-prem network that performs the
+> device-native login/command on the agent's behalf.** The SRE Agent does **not**
+> SSH into the router itself: it is a **cloud-managed service with no route** into
+> the private RFC1918 LAN, and its action surface is **Azure control-plane
+> operations** (ARM calls + connectors, gated by RBAC and approval), *not* a
+> general SSH client holding device credentials. So it triggers an Azure action it
+> *is* allowed to make (e.g. `az vm run-command`), which lands execution on the
+> in-network executor, and **that box** does the SSH → PAM → RADIUS login. Who
+> plays "executor" differs by environment (see the split below).
+
+**Keep two contexts separate — this section is split accordingly.** What is fine
+for the lab (basic authN/authZ on a container/VM box) is *not* what you would run
+against real hardware under stringent security requirements:
+
+| Concern | 🧪 Lab (this repo) | 🏭 Production (hardware, stringent security) |
+|---------|--------------------|----------------------------------------------|
+| Device | FRR on a Linux VM / Containerlab | vendor NOS (Cisco / Juniper / Nokia / Arista) |
+| **Executor** | the **collector VM** (reuses the monitoring box) | a **dedicated hardened bastion / PAM jump server** — *never* the monitoring box (separation of duties) |
+| Agent → executor | `az vm run-command` | Automation Hybrid Worker / Function / privileged-access workflow, with approval |
+| AuthN | `pam_radius` → FreeRADIUS (single box) | RADIUS/TACACS+ to a **hardened, HA AAA cluster** |
+| AuthZ | coarse (login = shell) | **TACACS+ per-command** authorization |
+| Accounting | FreeRADIUS auth log → `OnPremAAA_CL` | RADIUS Accounting (1813) + TACACS+ command accounting → **SIEM** |
+| Secrets | script-default shared secret; static `netops-oper` | Key Vault / HSM; **JIT short-lived** creds; **RadSec** certs (§8.4) |
+| Approval | optional (demo the gate) | **mandatory human-in-the-loop** for every write |
+
+The subsections below give the **lab wiring first**, then the **production
+hardening** for each concern.
+
 ### 8.1 AAA, precisely — and what we have vs. what actuation needs
 
 | AAA leg | Question | Protocol packet | Implemented today? | Needed for actuation? |
@@ -611,19 +640,22 @@ So §3 gave us **authentication + an audit trail**. Actuation additionally needs
 
 ### 8.2 The execution path — an in-VNet executor (jump host)
 
-The SRE Agent runs in Azure and has no direct route into the on-prem LAN. The
-clean pattern is to have it invoke an **executor that already lives in the on-prem
-VNet** — the **collector VM is the natural choice** (it has line-of-sight to every
-device and already holds the AAA relationship). The agent reaches the executor via
-an **Azure control-plane action** it *is* allowed to make (`az vm run-command`, or
-an Automation runbook / Function on a Hybrid Worker), and the executor performs the
+The SRE Agent runs in Azure and has no direct route into the on-prem LAN, so it
+invokes an **executor that already lives in the on-prem VNet**. **In the lab** the
+**collector VM is the natural choice** (it has line-of-sight to every device and
+already holds the AAA relationship). **In production, use a dedicated hardened
+bastion / PAM jump server instead — never the monitoring collector** — so that
+privileged device access is isolated from telemetry collection (separation of
+duties). Either way the agent reaches the executor via an **Azure control-plane
+action** it *is* allowed to make (`az vm run-command` in the lab; an Automation
+runbook / Function on a Hybrid Worker in production), and the executor performs the
 device-native change (SSH / NETCONF / gNMI / vendor API).
 
 ```mermaid
 sequenceDiagram
     participant AL as Azure Monitor alert
     participant AG as SRE Agent (Azure)
-    participant EX as Executor (collector VM)
+    participant EX as Executor (lab: collector VM · prod: bastion)
     participant FR as FreeRADIUS (collector)
     participant DEV as Device (FRR router)
     participant OBS as Azure Monitor (Syslog + OnPremAAA_CL)
@@ -657,30 +689,45 @@ Why this shape:
   which flow back through §1/§3, so the agent can **verify its own remediation**
   and the audit trail shows an autonomous actor did it.
 
-### 8.3 Concrete additions to implement actuation (proposed)
+### 8.3 Implementing actuation — lab path vs. production hardening
 
-These build directly on what already exists; none are deployed yet:
+None of this is deployed yet. Each step lists the **🧪 lab** implementation (the
+minimum to prove the path on FRR) and the **🏭 production** hardening for real
+hardware under stringent security requirements.
 
-1. **Agent service account in RADIUS.** Add an `sre-agent` principal to FreeRADIUS
-   (`mods-config/files/authorize`) with a **strong, Key Vault-sourced credential**
-   — distinct from the human `netops-oper`, so its actions are attributable and
-   independently revocable. Enable **RADIUS Accounting** (port **1813**,
-   `Acct-Start/Stop`) alongside the auth log for a formal session record.
-2. **Authorization scoping.** RADIUS alone gives coarse authorization. Two options:
-   - *RADIUS VSAs / `Filter-Id` / privilege-level* → map `sre-agent` to a
-     restricted profile (read-mostly, or a fixed command allow-list enforced by a
-     restricted shell / `rbash` / `sudo` policy on the device).
-   - *Move authorization to **TACACS+*** (e.g. `tac_plus`) for true **per-command
-     authorization + command accounting**, which is the industry norm for network
-     device AAA and what real Cisco/Juniper/Nokia gear uses. RADIUS stays for
-     authentication; TACACS+ handles "may `sre-agent` run *this exact command*?".
-3. **Executor role assignment.** A custom Azure role on the collector VM granting
-   the agent identity *only* `virtualMachines/runCommand/action`, plus a hardened
-   remediation script on the collector that SSHes to the device as `sre-agent` and
-   accepts only a **whitelisted set of parameterized fixes**.
-4. **Human-in-the-loop for writes.** Keep observation/diagnosis autonomous, but
-   require approval on any command that mutates device state (the SRE Agent
-   supports gated actions in response plans).
+1. **Agent service account.**
+   - 🧪 *Lab:* add an `sre-agent` principal to FreeRADIUS
+     (`mods-config/files/authorize`), distinct from the human `netops-oper` so its
+     actions are attributable and independently revocable. Enable **RADIUS
+     Accounting** (port **1813**, `Acct-Start/Stop`) alongside the auth log for a
+     formal session record.
+   - 🏭 *Prod:* the account lives in a **hardened, HA AAA cluster**; its credential
+     is **JIT / short-lived from Key Vault or an HSM** (see §8.4), never a static
+     password; accounting streams to a **SIEM**, not only Log Analytics.
+
+2. **Authorization scoping.**
+   - 🧪 *Lab:* RADIUS gives only coarse authorization, so constrain `sre-agent` with
+     a **restricted shell** (`rbash` / forced-command / `sudo` allow-list) on the
+     device — login still equals "a shell", but only a fixed command set runs.
+   - 🏭 *Prod:* use **TACACS+** (modelled with `tac_plus` in the lab) for true
+     **per-command authorization + command accounting** — the industry norm for
+     Cisco / Juniper / Nokia. RADIUS authenticates; TACACS+ answers "may
+     `sre-agent` run *this exact command*?".
+
+3. **Execution trigger & blast radius.**
+   - 🧪 *Lab:* a custom Azure role on the collector VM granting the agent identity
+     *only* `Microsoft.Compute/virtualMachines/runCommand/action`, plus a hardened
+     remediation script that SSHes as `sre-agent` and accepts only a **whitelisted
+     set of parameterized fixes**.
+   - 🏭 *Prod:* a **dedicated bastion / PAM jump server** (not the monitoring
+     collector), reached via an **Automation Hybrid Worker / Function**; the
+     allow-listed fixes are versioned, code-reviewed, and signed.
+
+4. **Human-in-the-loop.**
+   - 🧪 *Lab:* optional — useful to demonstrate the gated-action flow.
+   - 🏭 *Prod:* **mandatory approval** on any state-mutating command; observation and
+     diagnosis stay autonomous. The SRE Agent supports gated actions in response
+     plans.
 
 > **When to graduate to a vendor NOS.** FRR authenticates via Linux PAM, so it
 > proves the *authentication + execution* path faithfully, but it has no native
