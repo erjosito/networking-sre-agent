@@ -25,6 +25,10 @@ topology:
 
   nodes:
     # WAN edge router (peers with the "core" over eBGP).
+    # eth2 is a host-facing data link (172.31.11.0/30) that lets the Azure lab-host
+    # VM (and thus a Connection Monitor) probe INTO the fabric: hostVM -> r1 -> (eBGP)
+    # -> r2 -> onprem-host. r1 advertises 172.31.11.0/30 so the return path is also
+    # BGP-dependent — breaking the r1<->r2 session fails the probe in both directions.
     onprem-r1:
       image: quay.io/frrouting/frr:9.1.0
       binds:
@@ -33,6 +37,8 @@ topology:
         - configs/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         - ip link set dev eth1 up
+        - ip link set dev eth2 up
+        - sysctl -w net.ipv4.ip_forward=1
 
     # Core router (owns the on-prem LAN, advertises it into BGP).
     onprem-r2:
@@ -44,6 +50,7 @@ topology:
       exec:
         - ip link set dev eth1 up
         - ip link set dev eth2 up
+        - sysctl -w net.ipv4.ip_forward=1
 
     # On-prem server / probe target behind the core router (serves HTTP on :80).
     onprem-host:
@@ -56,3 +63,4 @@ topology:
   links:
     - endpoints: ["onprem-r1:eth1", "onprem-r2:eth1"]   # 172.31.12.0/30 transit
     - endpoints: ["onprem-r2:eth2", "onprem-host:eth1"] # 172.31.20.0/24 LAN
+    - endpoints: ["onprem-r1:eth2", "host:clabr1host"]  # 172.31.11.0/30 host-facing probe link

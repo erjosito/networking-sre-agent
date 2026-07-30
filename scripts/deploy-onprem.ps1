@@ -157,13 +157,22 @@ Write-Host ""
 # ─── Stage 0: telemetry ──────────────────────────────────────────────────────
 
 if ($doTelemetry) {
-    $null = Invoke-ModuleDeploy -Name "collector" -Template (Join-Path $ModulesDir "onprem-collector.bicep") -Parameters (@(
+    $collector = Invoke-ModuleDeploy -Name "collector" -Template (Join-Path $ModulesDir "onprem-collector.bicep") -Parameters (@(
         "location=$Location", "prefix=$Prefix",
         "subnetId=$DefaultSubnetId", "collectorPrivateIp=$CollectorIp",
         "logAnalyticsWorkspaceId=$LawId",
         "radiusSharedSecret=$RadiusSharedSecret", "radiusOperatorPassword=$RadiusOperatorPassword"
     ) + $AuthParams)
     Write-Info "Collector deployed at $CollectorIp (syslog:514, AMA -> $Prefix-law, FreeRADIUS AAA)."
+
+    # Telemetry alerts (syslog critical, AAA auth failures, collector heartbeat
+    # missing, SNMP sysUpTime reset) — these detect control-plane/audit/device
+    # events that Connection Monitor cannot see.
+    $null = Invoke-ModuleDeploy -Name "log-alerts" -Template (Join-Path $ModulesDir "onprem-log-alerts.bicep") -Parameters @(
+        "prefix=$Prefix", "location=$Location", "alertEmail=$AlertEmail",
+        "logAnalyticsWorkspaceId=$LawId", "collectorVmId=$($collector.collectorVmId.value)"
+    )
+    Write-Info "On-prem telemetry alerts deployed ($Prefix-onprem-ag: syslog/AAA/heartbeat/SNMP)."
 }
 
 # ─── Stage 1: in-path device + target + monitoring ───────────────────────────
@@ -235,6 +244,16 @@ if ($doClab) {
     $clabIp = $clab.clabPrivateIp.value
     Write-Info "Containerlab host deployed at $clabIp (Docker + Containerlab)."
     Write-Info "Fabric auto-deploys on boot from branch '$RepoBranch' (allow a few minutes for image pulls)."
+
+    # Connection Monitor that traverses the containerized fabric: clab-host -> r1 ->
+    # eBGP -> r2 -> in-fabric server (172.31.20.10). Breaking the r1<->r2 session
+    # fails this probe (control-plane fault localized to the simulated fabric).
+    $clabCm = Invoke-ModuleDeploy -Name "clab-connection-monitor" -Template (Join-Path $ModulesDir "onprem-clab-connection-monitor.bicep") -Scope "NetworkWatcherRG" -Parameters @(
+        "location=$Location", "prefix=$Prefix",
+        "clabVmId=$($clab.clabVmId.value)", "clabVmName=$($clab.clabVmName.value)", "clabVmIp=$clabIp",
+        "logAnalyticsWorkspaceId=$LawId"
+    )
+    Write-Info "Containerlab Connection Monitor deployed: $($clabCm.connectionMonitorId.value)"
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
@@ -251,6 +270,7 @@ if ($doDevice) {
 }
 if ($doClab) {
     Write-Host "  Containerlab   : $clabIp  (2x FRR + host; SSH in and run 'sudo containerlab inspect -t /opt/networking-sre-agent/infra/containerlab/onprem.clab.yml')"
+    Write-Host "  Clab detection : breaking the r1<->r2 BGP session fails '$Prefix-clab-connection-monitor'"
 }
 Write-Host ""
 Write-Info "Verify: KQL 'Syslog | where TimeGenerated > ago(15m) | take 20' in $Prefix-law"

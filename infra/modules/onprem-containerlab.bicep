@@ -164,6 +164,20 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-03-01' = {
   }
 }
 
+// Network Watcher agent — required for this VM to act as a Connection Monitor
+// SOURCE endpoint (probes the in-fabric server through the containerlab data path).
+resource nwAgent 'Microsoft.Compute/virtualMachines/extensions@2024-03-01' = {
+  parent: vm
+  name: 'AzureNetworkWatcherExtension'
+  location: location
+  properties: {
+    publisher: 'Microsoft.Azure.NetworkWatcher'
+    type: 'NetworkWatcherAgentLinux'
+    typeHandlerVersion: '1.4'
+    autoUpgradeMinorVersion: true
+  }
+}
+
 output clabVmId string = vm.id
 output clabVmName string = vm.name
 output clabPrivateIp string = nic.properties.ipConfigurations[0].properties.privateIPAddress

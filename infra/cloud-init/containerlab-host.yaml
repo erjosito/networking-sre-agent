@@ -46,6 +46,14 @@ write_files:
       fi
       cd "$SRC/infra/containerlab"
       containerlab deploy -t onprem.clab.yml --reconfigure
+      # Wire the host-facing probe link so the Azure lab-host VM (and a Connection
+      # Monitor sourced from it) can reach the in-fabric server 172.31.20.10 through
+      # r1 -> (eBGP) -> r2 -> onprem-host. The host side of the r1:eth2 veth is named
+      # 'clabr1host' (see onprem.clab.yml). Idempotent.
+      for i in $(seq 1 30); do ip link show clabr1host >/dev/null 2>&1 && break || sleep 2; done
+      ip addr replace 172.31.11.1/30 dev clabr1host
+      ip link set dev clabr1host up
+      ip route replace 172.31.20.0/24 via 172.31.11.2 dev clabr1host
 
   # Rebuild the fabric on every boot (containerlab links are lost across reboots).
   - path: /etc/systemd/system/onprem-clab.service
