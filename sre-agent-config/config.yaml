@@ -21,6 +21,11 @@ knowledge:
   - knowledge/azure-firewall-and-ddos.md
   - knowledge/azure-front-door.md
   - knowledge/virtual-wan.md
+  # On-premises networking (containerlab fabric + telemetry + fault runbooks)
+  - knowledge/onprem-network-topology.md
+  - knowledge/onprem-telemetry-and-observability.md
+  - knowledge/onprem-bgp-fault-runbook.md
+  - knowledge/onprem-ospf-fault-runbook.md
 
 # Custom agents (sub-agents)
 customAgents:

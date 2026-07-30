@@ -23,12 +23,17 @@ CLIs, syslog formats and (with SR Linux) gNMI/SNMP telemetry.
 
 - **onprem-r1 / onprem-r2** — FRRouting routers running an eBGP session. `r2`
   owns the on-prem LAN (`172.31.20.0/24`) and advertises it; `r1` is the WAN edge.
+  They **also run OSPF area 0** over the transit link as the on-prem IGP, carrying
+  the router loopbacks (`10.99.1.1/32`, `10.99.2.2/32`) — advertised *only* via
+  OSPF, not BGP.
 - **onprem-host** — a Linux server on the LAN, default route via `r2`, serving
   HTTP on port 80 (a probe target).
 
 Breaking the `r1<->r2` BGP session or the transit link withdraws the LAN route
 from `r1`, so `onprem-host` becomes unreachable from the edge — a realistic,
-observable **control-plane** fault.
+observable **control-plane** fault. An **OSPF** misconfig (area/network-type/MTU
+mismatch) instead breaks internal loopback reachability *without* touching the
+BGP-carried data path — see `knowledge/onprem-ospf-fault-runbook.md`.
 
 ## Prerequisites
 
@@ -66,6 +71,23 @@ docker exec -it clab-onprem-onprem-r1 ip link set dev eth1 down
 # Verify the impact
 docker exec -it clab-onprem-onprem-r1 vtysh -c 'show ip route 172.31.20.0/24'
 ```
+
+### OSPF misconfig (IGP fault, does NOT affect the BGP data path)
+
+```bash
+# Area mismatch on the transit — adjacency drops, peer loopback withdrawn
+docker exec -it clab-onprem-onprem-r1 vtysh -c 'configure terminal' \
+  -c 'router ospf' -c 'no network 172.31.12.0/30 area 0' \
+  -c 'network 172.31.12.0/30 area 1'
+
+docker exec -it clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor'   # empty
+docker exec -it clab-onprem-onprem-r1 ping -c2 -I 10.99.1.1 10.99.2.2    # fails
+# BGP + 172.31.20.0/24 remain UP throughout. Revert: swap area 1 -> area 0.
+```
+
+> Prefer `vtysh -c 'configure terminal'` (not `conf t`) and, over
+> `az vm run-command`, **base64-encode** the script — nested quotes are otherwise
+> corrupted.
 
 ## Higher fidelity: Nokia SR Linux
 

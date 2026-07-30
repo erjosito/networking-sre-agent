@@ -16,9 +16,10 @@ infra/modules/*.bicep         — Individual modules (hub, spoke, onprem, vpn-co
 scripts/deploy.ps1            — Full deployment + post-deploy config
 scripts/check-health.ps1      — 20-section environment validation
 scripts/inject-fault.ps1      — 26 fault scenarios across 6 categories
-scripts/upload-knowledge.ps1  — Upload knowledge files to SRE Agent
+scripts/upload-knowledge.ps1  — Print manual knowledge-upload instructions (portal)
+scripts/configure-sre-agent.ps1 — Reconcile config.yaml vs the live agent (validator + portal checklist)
 sre-agent-config/             — Agent config manifest, custom agents, skills
-knowledge/                    — 13 markdown files for SRE Agent knowledge base
+knowledge/                    — 17 markdown files for SRE Agent knowledge base (incl. 4 on-prem: topology, telemetry, BGP + OSPF runbooks)
 ref/                          — Reference material (gitignored, not committed)
 ```
 
@@ -157,6 +158,13 @@ if ($resultMsg -match '(?s)\[stdout\]\s*(.*?)\s*\[stderr\]') {
 
 ## SRE Agent Configuration
 
+### Two configuration planes (important)
+The agent's config is split, and **only the control plane is automatable**:
+- **Control plane (ARM / `sre-agent.bicep`)**: the agent resource, managed identity + RBAC, mode/access, default model, `knowledgeGraphConfiguration.managedResources` (Azure RG scopes), and App Insights / Azure Monitor wiring.
+- **Data plane (portal `sre.azure.com` only)**: uploaded knowledge files, custom agents, skills, response plans, scheduled tasks. As of `2025-05-01-preview` there is **no ARM/az surface** for these (no `az sre` extension; agent `/knowledge` child returns 404).
+- `scripts/configure-sre-agent.ps1` reconciles `config.yaml` against the live agent: validates every referenced file exists, reports control-plane state, and prints an itemized portal checklist. Requires Python + PyYAML. `deploy.ps1` deploys only the agent **resource** — it does NOT upload knowledge or create data-plane objects.
+- **Known drift to check:** the live `netsre-sre-agent` had `knowledgeGraphConfiguration.managedResources = []` (0 scopes) — the agent's knowledge graph is not scoped to `netsre-rg`. Fix by redeploying `sre-agent.bicep` with `managedResourceGroupIds=[<netsre-rg id>]`.
+
 ### Agent resource
 - API: `Microsoft.App/agents@2025-05-01-preview`
 - Mode: Autonomous, Access: High, Model: Automatic
@@ -192,6 +200,7 @@ Extends the lab to **on-premises networking** (device simulation, telemetry, aud
 - **Stage 1 — in-path device + detection** (`onprem-router.bicep`, `onprem-lan.bicep`, `onprem-connection-monitor.bicep`, `onprem-alerts.bicep`): FRR router-on-a-stick at `10.100.1.201`; on-prem server in a new `onprem-lan` subnet (`10.100.2.0/24`) behind it. UDRs force the data path through FRR (LAN `0/0`→FRR; GatewaySubnet `10.100.2.0/24`→FRR). CM + metric alerts detect a device fault.
 - **Stage A2 — Containerlab** (`onprem-containerlab.bicep`, `cloud-init/containerlab-host.yaml`, `infra/containerlab/`): high-fidelity option — a host VM runs Docker + Containerlab and boots a containerized fabric (2× FRR eBGP + a Linux server). **Now wired into the Azure data path (T3):** the host VM runs the Network Watcher agent and a CM (`onprem-clab-connection-monitor.bicep`) probes the in-fabric server via `host → r1 → eBGP → r2`, so breaking r1↔r2 BGP fails the probe both ways (return path is BGP-dependent too). See `infra/containerlab/README.md`.
 - **Alerting** (`onprem-log-alerts.bicep`, `onprem-alerts.bicep`): the `telemetry` stage deploys log/metric alerts (action group `${prefix}-onprem-ag`) — syslog-critical (sev2), aaa-auth-failures (sev2), collector-heartbeat-missing (sev1), snmp-uptime-reset (sev3). `onprem-alerts.bicep` is parameterized by `monitorLabel` (default `onprem`; use `clab` for the containerlab CM) so it deploys per-CM without name collisions → `${prefix}-{onprem,clab}-cm-{checks-failed,test-result-fail}`.
+- **OSPF IGP + fault scenario** (`infra/containerlab/configs/{r1,r2}/frr.conf`, `.../daemons`): the fabric also runs **OSPF area 0** over the r1↔r2 transit (`ip ospf network point-to-point`), carrying the router **loopbacks** (`10.99.1.1/32`, `10.99.2.2/32`) — advertised **only via OSPF, not BGP**. This enables a realistic on-prem **OSPF misconfig** scenario (e.g. area/network-type/MTU mismatch) that breaks internal reachability *without* touching the BGP-carried LAN data path or the clab CM. Verified live: adjacency Full → area mismatch → neighbor empty → revert → Full, BGP untouched. Runbook: `knowledge/onprem-ospf-fault-runbook.md`.
 
 ### Key design decisions & lessons
 - **CM sources are two Azure spokes (`spoke11` + `spoke21`), NOT the on-prem VM.** The on-prem VM sits in the `default` subnet with no UDR, so it reaches `onprem-lan` via the **direct VNet system route, bypassing FRR** → a false "pass" when FRR is broken. Spoke sources arrive via the VPN gateway → GatewaySubnet UDR → FRR, so they genuinely transit the device. Using one spoke per hub also tests both hubs and enables fault localization (on-prem-server probes fail while spoke-to-spoke still pass).
@@ -232,4 +241,6 @@ Also delete: SRE agent (if in separate RG), connection monitors in NetworkWatche
 | `az vm run-command` with multi-`-c` `vtysh`/`docker exec` quotes mangled → host ran unintended command (once accidentally scheduled a VM `shutdown`) | PowerShell string → `az ... --scripts` corrupts nested quotes | **Base64-encode the bash** in PowerShell (`[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bash))`) and run `echo <b64> \| base64 -d \| bash` on the VM. Use `vtysh -c 'configure terminal'` (not `conf t`). |
 | Containerlab host-veth wiring (T3) missing after a **reboot** of an existing clab VM | `/usr/local/bin/onprem-clab-up.sh` is baked by cloud-init `write_files` **once** at first boot; re-running it pulls fresh topology from git but does **not** rewrite the script, so newer host-veth lines are absent | The committed IaC is correct for a **fresh** clab VM deploy. On an existing VM, re-apply the veth IP + route manually (base64 run-command). |
 | CM portal status shows **Unknown** but LAW has recent rows | Source VMs **deallocated** → NW agents stopped probing → no fresh rollup (LAW retains historical rows) | Start the source VMs; not a config fault |
+| `onprem-to-webapp` CM broken / TM endpoints **Degraded** | Both hub **App Gateways were Stopped** (cost-saving, like deallocated VMs) → TM health probes fail | `az network application-gateway start -g netsre-rg -n netsre-hub{1,2}-appgw`; TM endpoints return **Online** and the test recovers |
+| SRE agent has no knowledge / connectors after deploy | `deploy.ps1` deploys only the agent **resource**; knowledge/agents/skills/plans are **portal-only** data plane | Run `scripts/configure-sre-agent.ps1` to validate `config.yaml` + get the portal checklist; upload in `sre.azure.com` |
 | `az --query "length(@)"` errors `-o was unexpected at this time` (PowerShell) | cmd mangles the `(@)` | Use `(az ... -o json | ConvertFrom-Json).Count` |
