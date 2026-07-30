@@ -83,12 +83,40 @@ syslog), swap the router nodes to **Nokia SR Linux**, which is publicly pullable
 SR Linux exposes gNMI on 57400 and JSON-RPC on 443; point an OpenTelemetry
 Collector / Telegraf gNMI input at it and export to Azure Monitor (Part B).
 
-## Relationship to the Azure data path (T3)
+## Relationship to the Azure data path (T3) — implemented
 
-By default this fabric is **self-contained inside the host VM** — a faithful
-on-prem simulation for telemetry/audit/CLI demos. To make an in-fabric host a
-Connection Monitor **target** reachable from Azure spokes (option **T3** in the
-design doc, requires **D3c**), the fabric's LAN must be bridged to the host VM's
-Azure NIC (macvlan/host networking) and routed across the VPN underlay. That
-integration is intentionally out of scope for this first A2 drop; the FRR-on-VM
-tiers (Stage 1, options T1/T2) remain the recommended in-path detection design.
+This fabric is now wired into the Azure Connection Monitor data path (option
+**T3** in the design doc) so that **control-plane faults inside the containerlab
+fabric are observable from Azure**.
+
+### How the traversal works
+
+A host-facing veth (`clabr1host`) connects the host VM to `onprem-r1:eth2` on the
+transit subnet `172.31.11.0/30`:
+
+- Host side `clabr1host` = `172.31.11.1/30`, with a route
+  `172.31.20.0/24 via 172.31.11.2` pushed into the host VM.
+- `onprem-r1:eth2` = `172.31.11.2/30`; r1 advertises `172.31.11.0/30` into BGP so
+  the **return path is also BGP-dependent**.
+
+The host VM runs the **Network Watcher agent extension** (added in
+`onprem-containerlab.bicep`), making it a valid Connection Monitor **source**. The
+CM `netsre-clab-connection-monitor` (`onprem-clab-connection-monitor.bicep`)
+probes from the host VM to the in-fabric server `172.31.20.10` (ICMP + HTTP:80),
+which routes host → r1 → **eBGP** → r2 → server.
+
+Because both the forward path (host route → r1 → r2) and the return path
+(r2 → r1 → BGP-learned `172.31.11.0/30`) depend on the `onprem-r1 ↔ onprem-r2`
+eBGP session, **breaking that session (or the r1/r2 link) fails the CM probe** and
+raises `netsre-clab-cm-checks-failed` / `netsre-clab-cm-test-result-fail`.
+Verified live: normal probe `ttl=62` (2 hops) + `HTTP:200`; BGP down →
+`% Network not in table` + 100% loss; restore → passes.
+
+### Caveat — cloud-init script is baked at first boot
+
+`/usr/local/bin/onprem-clab-up.sh` is written by cloud-init `write_files` **once**
+at VM creation. Re-running it pulls fresh topology files from git (so
+`onprem.clab.yml` + `frr.conf` updates apply on redeploy), but it does **not**
+rewrite the script itself — the host-veth wiring (veth IP + route) only takes
+effect on a **fresh** clab VM deploy. On an existing VM apply it manually via
+run-command (base64-encode the bash to avoid quoting corruption; see SKILL.md).

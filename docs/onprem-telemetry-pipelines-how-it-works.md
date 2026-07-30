@@ -480,6 +480,52 @@ via `replace()` (the same mechanism as `COLLECTOR_IP_PLACEHOLDER`). Defaults liv
 in `deploy-onprem.ps1` (mirroring the `vpnSharedKey` pattern). For production these
 belong in **Key Vault**, not script defaults.
 
+### 4.5 Alerting on the telemetry (turning signals into incidents)
+
+The pipelines above only *land* data; alerts make it actionable and give the SRE
+Agent an incident to attach a response plan to. Two Bicep modules define them:
+
+**`infra/modules/onprem-log-alerts.bicep`** — an action group `${prefix}-onprem-ag`
+plus rules over the ingested data (deployed by the `telemetry` stage):
+
+| Alert | Type | Signal | Sev |
+|-------|------|--------|-----|
+| `${prefix}-onprem-syslog-critical` | scheduled query | `Syslog` `daemon` facility, severity `critical/alert/emergency` | 2 |
+| `${prefix}-onprem-aaa-auth-failures` | scheduled query | `OnPremAAA_CL` where `Result == "Failure"` | 2 |
+| `${prefix}-onprem-collector-heartbeat-missing` | scheduled query | `Heartbeat` gap for `Computer == onprem-collector` | 1 |
+| `${prefix}-onprem-snmp-uptime-reset` | metric alert | `onprem/snmp` `sysUpTime` drop (device reboot) | 3 |
+
+> Schema gotchas baked into the queries: FRR syslog is the **`daemon`** facility
+> with severity strings `error/critical/alert/emergency` (it is `error`, *not*
+> `err`); `OnPremAAA_CL` columns have **no `_s` suffix** (`Result`, `Operator`,
+> `ClientHost`, `RawData`); Heartbeat only exists for `onprem-collector` (AMA is
+> only installed there); `onprem/snmp` has `sysUpTime` but there is **no
+> `ifOperStatus`** custom metric.
+
+**`infra/modules/onprem-alerts.bicep`** — metric alerts on a **Connection Monitor**
+(`ChecksFailedPercent` / `TestResult`). It is parameterized with a `monitorLabel`
+so it can be deployed once per CM without name collisions:
+
+| `monitorLabel` | Targets CM | Produces |
+|----------------|-----------|----------|
+| `onprem` (default) | `netsre-onprem-connection-monitor` | `${prefix}-onprem-cm-checks-failed` (sev2), `${prefix}-onprem-cm-test-result-fail` (sev1) |
+| `clab` | `netsre-clab-connection-monitor` | `${prefix}-clab-cm-checks-failed` (sev2), `${prefix}-clab-cm-test-result-fail` (sev1) |
+
+The `clab` variant is what turns a **containerlab control-plane fault** (a broken
+`onprem-r1 ↔ onprem-r2` eBGP session) into a fired Azure alert — see §4.6.
+
+### 4.6 Containerlab traversal Connection Monitor (T3)
+
+`infra/modules/onprem-clab-connection-monitor.bicep` makes control-plane faults
+*inside* the containerlab fabric observable from Azure. The clab host VM runs the
+**Network Watcher agent** (extension added in `onprem-containerlab.bicep`) and
+probes the in-fabric server `172.31.20.10` (ICMP + HTTP:80). The probe path is
+`host → onprem-r1 → eBGP → onprem-r2 → server`, and the **return path is also
+BGP-dependent** (r1 advertises the host-facing `172.31.11.0/30` into BGP), so
+breaking r1↔r2 BGP fails the probe both ways and raises the `clab` CM alerts.
+See `infra/containerlab/README.md` → *Relationship to the Azure data path (T3)*
+for the veth/route wiring and the baked-cloud-init caveat.
+
 ---
 
 ## 5. File map
@@ -491,7 +537,11 @@ belong in **Key Vault**, not script defaults.
 | Collector VM + AMA + Syslog DCR + Metrics Publisher role | `infra/modules/onprem-collector.bicep` |
 | FRR router VM + RADIUS secret param | `infra/modules/onprem-router.bicep` |
 | AAA DCE + `OnPremAAA_CL` table + text-log DCR | `infra/modules/onprem-aaa.bicep` |
-| Deploy orchestration (`telemetry` / `device` / `aaa` stages) | `scripts/deploy-onprem.ps1` |
+| Log/metric alerts (syslog, AAA, heartbeat, SNMP) + action group | `infra/modules/onprem-log-alerts.bicep` |
+| Connection Monitor metric alerts (parameterized by `monitorLabel`) | `infra/modules/onprem-alerts.bicep` |
+| Containerlab-traversal Connection Monitor (T3) | `infra/modules/onprem-clab-connection-monitor.bicep` |
+| Containerlab host VM + Network Watcher agent extension | `infra/modules/onprem-containerlab.bicep` |
+| Deploy orchestration (`telemetry` / `device` / `aaa` / `containerlab` stages) | `scripts/deploy-onprem.ps1` |
 
 ---
 

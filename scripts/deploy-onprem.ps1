@@ -254,6 +254,15 @@ if ($doClab) {
         "logAnalyticsWorkspaceId=$LawId"
     )
     Write-Info "Containerlab Connection Monitor deployed: $($clabCm.connectionMonitorId.value)"
+
+    # Checks-failed / test-result alerts for the containerlab path so breaking the
+    # r1<->r2 BGP session raises an incident the SRE Agent can act on.
+    $null = Invoke-ModuleDeploy -Name "clab-alerts" -Template (Join-Path $ModulesDir "onprem-alerts.bicep") -Parameters @(
+        "prefix=$Prefix", "alertEmail=$AlertEmail",
+        "connectionMonitorId=$($clabCm.connectionMonitorId.value)",
+        "monitorLabel=clab", "actionGroupShortName=ClabNetOps"
+    )
+    Write-Info "Containerlab alerts deployed ($Prefix-clab-cm-checks-failed)."
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

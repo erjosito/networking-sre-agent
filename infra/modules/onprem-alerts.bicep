@@ -11,11 +11,17 @@ param alertEmail string
 @description('On-prem Connection Monitor resource ID to monitor')
 param connectionMonitorId string
 
+@description('Label distinguishing this monitor\'s alert resources (e.g. "onprem" for the FRR-on-VM path, "clab" for the containerlab fabric path). Keeps names unique so multiple on-prem monitors can coexist.')
+param monitorLabel string = 'onprem'
+
+@description('Short display label for the action group (<=12 chars)')
+param actionGroupShortName string = 'OnpNetOps'
+
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: '${prefix}-onprem-netops-ag'
+  name: '${prefix}-${monitorLabel}-netops-ag'
   location: 'global'
   properties: {
-    groupShortName: 'OnpNetOps'
+    groupShortName: actionGroupShortName
     enabled: true
     emailReceivers: [
       {
@@ -30,7 +36,7 @@ resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 // Fires when probes to the on-prem server fail — i.e. the FRR router / LAN path
 // is broken (data-plane detection).
 resource checksFailedAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
-  name: '${prefix}-onprem-cm-checks-failed'
+  name: '${prefix}-${monitorLabel}-cm-checks-failed'
   location: 'global'
   properties: {
     description: 'On-prem Connection Monitor: more than 20% of probes to the on-prem server are failing (sustained over 5 min)'
@@ -64,7 +70,7 @@ resource checksFailedAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
 }
 
 resource testResultAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = {
-  name: '${prefix}-onprem-cm-test-result-fail'
+  name: '${prefix}-${monitorLabel}-cm-test-result-fail'
   location: 'global'
   properties: {
     description: 'On-prem Connection Monitor: one or more tests to the on-prem server report unreachable sustained over 5 min (TestResult=Fail)'
