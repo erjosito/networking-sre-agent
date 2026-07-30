@@ -20,12 +20,18 @@
         token audience https://azuresre.dev):
           - Knowledge upload: POST /api/v1/agentmemory/upload  (multipart/form-data,
             form field name `files`, repeatable; <=16MB/file, <=100MB total).
+          - Custom (sub)agents:  PUT /api/v1/extendedAgent/apply  (AgentConfiguration
+            YAML; upserts a handoff subagent with its system prompt + tools).
+          - Response plans:  incident FILTER  PUT /api/v1/incidentplayground/filters/{id}
+            bound to a custom-agent HANDLER  PUT /api/v1/incidentplayground/handlers/{id}
+            (routes matching incidents to a subagent → the agent investigates them).
           - Status:  GET /api/v1/agentmemory/status
           - Indexer: GET /api/v1/agentmemory/indexer-status  (documentsProcessed/Failed).
-        Applied here with curl.exe.
+        Applied here with curl.exe (all data-plane requests send `Accept: application/json`;
+        filter/handler JSON is written without a BOM to avoid a 405 static-handler misroute).
 
-    Custom agents, skills, incident response plans and scheduled tasks do NOT yet have a
-    published/stable programmatic envelope; they are reported as a portal checklist.
+    Skills, connectors and scheduled tasks do not yet have a stable programmatic envelope
+    here; they are reported as a portal checklist.
 
     Run modes:
       * default (report):  validate the manifest, show live agent state, print what WOULD
@@ -91,6 +97,22 @@ function Write-Miss($t) { Write-Host "  [MISS] $t" -ForegroundColor Red; $script
 function Write-Todo($t) { Write-Host "  [TODO] $t" -ForegroundColor Yellow }
 function Write-Chg($t)  { Write-Host "  [CHNG] $t" -ForegroundColor Magenta }
 function Write-Info2($t){ Write-Host "  $t" -ForegroundColor Gray }
+
+# Upsert a data-plane JSON object: PUT creates, POST updates an existing one.
+# Tries PUT first (create), falls back to POST (update) on non-2xx. Returns the
+# first 2xx result, else the last attempt.
+function Invoke-DpUpsert($url, $bodyFile, $token) {
+    $last = $null
+    foreach ($m in @('PUT','POST')) {
+        $r = curl.exe -s -w "`n%{http_code}" -X $m $url `
+            -H "Authorization: Bearer $token" -H "Accept: application/json" -H "Content-Type: application/json" `
+            --data-binary "@$bodyFile" 2>&1 | Out-String
+        $c = ($r.Trim() -split "`n")[-1]
+        $last = @{ code = $c; body = $r.Trim(); method = $m }
+        if ($c -match '^20\d$') { return $last }
+    }
+    return $last
+}
 
 # ── Parse the manifest (YAML → JSON via PyYAML) ──────────────────────────────
 if (-not (Test-Path $ConfigFile)) { Write-Host "ERROR: manifest not found: $ConfigFile" -ForegroundColor Red; exit 1 }
@@ -231,21 +253,109 @@ if ($Apply -and -not $SkipKnowledge -and $knowledgePaths.Count -gt 0 -and $endpo
     Write-Info2 "(report-only: re-run with -Apply to upload $($knowledgePaths.Count) knowledge file(s) to agent memory)"
 }
 
-# ── Portal-only items (no stable programmatic envelope yet) ───────────────────
-Write-Head "Custom agents ($($cfg.customAgents.Count)) — PORTAL"
+# ── Data plane: custom agents (subagents) — extendedAgent/apply ──────────────
+# The agent data plane accepts an AgentConfiguration document (YAML) at
+# PUT /api/v1/extendedAgent/apply. We wrap each definition file's fields into the
+# apply envelope and upsert it. Must send `Accept: application/json` or the SPA
+# static handler answers with HTML.
+Write-Head "Custom agents ($($cfg.customAgents.Count)) — DATA PLANE (extendedAgent/apply)"
+$dpApplyToken = $null
 foreach ($a in $cfg.customAgents) {
     $p = Join-Path $repoRoot $a.definitionFile
-    if (Test-Path $p) { Write-Ok "$($a.name)  ($($a.definitionFile))" } else { Write-Miss "$($a.name): $($a.definitionFile) not found" }
+    if (-not (Test-Path $p)) { Write-Miss "$($a.name): $($a.definitionFile) not found"; continue }
+    if (-not ($Apply -and $endpoint)) {
+        Write-Todo "$($a.name)  ($($a.definitionFile)) — re-run with -Apply to create"
+        continue
+    }
+    if (-not $dpApplyToken) { $dpApplyToken = az account get-access-token --resource $DataPlaneResource --query accessToken -o tsv 2>$null }
+    if (-not $dpApplyToken) { Write-Miss "Could not acquire data-plane token ($DataPlaneResource)."; break }
+
+    # Build the apply envelope YAML from the definition file (wrap spec).
+    $yamlOut = Join-Path ([IO.Path]::GetTempPath()) ("sre-apply-" + $a.name + ".yaml")
+    $pyApply = @"
+import yaml
+s = yaml.safe_load(open(r'''$p''', encoding='utf-8'))
+doc = {
+  'api_version': 'azuresre.ai/v1',
+  'kind': 'AgentConfiguration',
+  'metadata': {'name': s['name']},
+  'spec': {
+    'name': s['name'],
+    'system_prompt': s.get('system_prompt', ''),
+    'handoff_description': (s.get('handoff_description') or '').strip(),
+    'agent_type': 'Autonomous',
+    'tools': s.get('tools', []),
+  },
 }
+with open(r'''$yamlOut''', 'w', encoding='utf-8') as f:
+    yaml.dump(doc, f, sort_keys=False, width=100, default_flow_style=False)
+"@
+    $pyApply | python -
+    $resp = curl.exe -s -w "`n%{http_code}" -X PUT "$endpoint/api/v1/extendedAgent/apply" `
+        -H "Authorization: Bearer $dpApplyToken" -H "Accept: application/json" `
+        -H "Content-Type: application/x-yaml" --data-binary "@$yamlOut" 2>&1 | Out-String
+    Remove-Item $yamlOut -Force -ErrorAction SilentlyContinue
+    $code = ($resp.Trim() -split "`n")[-1]
+    if ($code -match '^20\d$') { Write-Ok "$($a.name) applied (HTTP $code)" }
+    else { Write-Miss "$($a.name) apply failed (HTTP $code): $($resp.Trim())" }
+}
+if ($Apply -and $endpoint -and $dpApplyToken) {
+    $agentsList = curl.exe -s "$endpoint/api/v1/extendedAgent/agents?page=1&limit=50" -H "Authorization: Bearer $dpApplyToken" -H "Accept: application/json" 2>$null | ConvertFrom-Json
+    if ($agentsList -and $agentsList.data) { Write-Info2 "custom agents on endpoint: $((@($agentsList.data) | ForEach-Object { $_.name }) -join ', ')" }
+}
+
 Write-Head "Skills ($($cfg.skills.Count)) — PORTAL"
 foreach ($s in $cfg.skills) {
     $p = Join-Path $repoRoot $s.directory
     if (Test-Path $p) { Write-Ok "$($s.name)  ($($s.directory))" } else { Write-Miss "$($s.name): $($s.directory) not found" }
 }
-Write-Head "Response plans ($($cfg.responsePlans.Count)) — PORTAL"
+# ── Data plane: incident response plans (filter + handler) ───────────────────
+# A response plan = an incident FILTER (which incidents to catch) bound to a
+# custom-agent HANDLER (what to do). Both are upserted on the agent data plane.
+# The filter must NOT carry an `incidentPlatform` property (derived server-side),
+# and all JSON is written WITHOUT a BOM or the request mis-routes to the static
+# handler (HTTP 405).
+Write-Head "Response plans ($($cfg.responsePlans.Count)) — DATA PLANE (incidentplayground)"
 foreach ($r in $cfg.responsePlans) {
-    Write-Todo "$($r.name)  [sev: $($r.severity -join ',')  agent: $($r.customAgent)  autonomy: $($r.autonomy)  titleContains: '$($r.titleContains)']"
+    $fid       = $r.name
+    $agentName = $r.customAgent
+    if (-not ($Apply -and $endpoint)) {
+        Write-Todo "$fid  [sev: $($r.severity -join ',')  agent: $agentName  autonomy: $($r.autonomy)  titleContains: '$($r.titleContains)'] — re-run with -Apply"
+        continue
+    }
+    if (-not $dpApplyToken) { $dpApplyToken = az account get-access-token --resource $DataPlaneResource --query accessToken -o tsv 2>$null }
+    if (-not $dpApplyToken) { Write-Miss "Could not acquire data-plane token ($DataPlaneResource)."; break }
+
+    # Filter (empty priorities = ALL; else e.g. ["Sev1","Sev2"]).
+    $prioJson = '[' + (($r.severity | ForEach-Object { '"' + $_ + '"' }) -join ',') + ']'
+    $cooldown = [int]($r.cooldownHours)
+    $titleC   = ("" + $r.titleContains) -replace '\\','\\' -replace '"','\"'
+    $filterJson = '{"id":"' + $fid + '","name":"' + $fid + '","priorities":' + $prioJson +
+        ',"titleContains":"' + $titleC + '","titleNotContains":[],"agentMode":"' + $r.autonomy +
+        '","handlingAgent":"' + $agentName + '","mergeEnabled":true,"mergeWindowHours":' + $cooldown + '}'
+    $ftmp = Join-Path ([IO.Path]::GetTempPath()) ("sre-filter-" + $fid + ".json")
+    [System.IO.File]::WriteAllText($ftmp, $filterJson)   # no BOM
+    $fres = Invoke-DpUpsert "$endpoint/api/v1/incidentplayground/filters/$fid" $ftmp $dpApplyToken
+    Remove-Item $ftmp -Force -ErrorAction SilentlyContinue
+    if ($fres.code -notmatch '^20\d$') { Write-Miss "$fid filter failed (HTTP $($fres.code)): $($fres.body)"; continue }
+
+    # Handler bound to the filter.
+    $guide = ("" + $r.description) -replace '\\','\\' -replace '"','\"'
+    $handlerJson = '{"id":"' + $fid + '","name":"","description":"' + $guide +
+        '","incidentFilterId":"' + $fid + '","incidentProcessingGuide":["' + $guide +
+        '"],"tools":[],"incidents":[],"customInstructions":""}'
+    $htmp = Join-Path ([IO.Path]::GetTempPath()) ("sre-handler-" + $fid + ".json")
+    [System.IO.File]::WriteAllText($htmp, $handlerJson)   # no BOM
+    $hres = Invoke-DpUpsert "$endpoint/api/v1/incidentplayground/handlers/$fid" $htmp $dpApplyToken
+    Remove-Item $htmp -Force -ErrorAction SilentlyContinue
+    if ($hres.code -match '^20\d$') { Write-Ok "$fid response plan applied (filter+handler, agent=$agentName, mode=$($r.autonomy))" }
+    else { Write-Miss "$fid handler failed (HTTP $($hres.code)): $($hres.body)" }
 }
+if ($Apply -and $endpoint -and $dpApplyToken) {
+    $handlers = curl.exe -s "$endpoint/api/v2/extendedAgent/incidentHandlers" -H "Authorization: Bearer $dpApplyToken" -H "Accept: application/json" 2>$null | ConvertFrom-Json
+    if ($handlers) { Write-Info2 "incident handlers on endpoint: $((@($handlers) | ForEach-Object { $_.id }) -join ', ')" }
+}
+
 Write-Head "Scheduled tasks ($($cfg.scheduledTasks.Count)) — PORTAL"
 foreach ($t in $cfg.scheduledTasks) {
     Write-Todo "$($t.name)  [schedule: $($t.schedule)  autonomy: $($t.autonomy)]"
@@ -299,15 +409,16 @@ else { Write-Todo "Fix: mode=$mode — agent PROPOSES fixes and waits for approv
 
 Write-Host @"
 
-  REQUIRED PORTAL STEP for a closed loop — Incident response plan(s):
-    Without at least one response plan the agent will NOT auto-act on incidents.
-    In https://sre.azure.com (Builder > Incident response plans) create a plan that
-    routes the severities you care about to a custom agent with the chosen autonomy.
-    Manifest declares $($cfg.responsePlans.Count): $((($cfg.responsePlans | ForEach-Object { $_.name }) -join ', ')).
+  CLOSED LOOP — Custom (sub)agents + Incident response plan(s):
+    These are now applied programmatically by this script (with -Apply) via the agent
+    data plane (extendedAgent/apply + incidentplayground filters/handlers). Without at
+    least one response plan the agent detects incidents but never investigates them
+    (threadId stays null). Manifest declares $($cfg.customAgents.Count) custom agent(s) and
+    $($cfg.responsePlans.Count) response plan(s): $((($cfg.responsePlans | ForEach-Object { $_.name }) -join ', ')).
     Docs: https://learn.microsoft.com/azure/sre-agent/incident-response-plans
   OPTIONAL PORTAL STEPS (improve investigation quality):
-    * Custom (sub)agents — $($cfg.customAgents.Count) declared (network-expert, connectivity-triage).
     * Connectors (data sources, e.g. Azure Monitor logs) — Builder > Connectors.
+    * Skills — $($cfg.skills.Count) declared; attach in Builder > Skills.
     * Confirm 'Builder > Incident platform' shows Azure Monitor connected + Save.
 "@ -ForegroundColor Gray
 
@@ -326,9 +437,11 @@ Write-Host @"
     * Control plane (ARM $ApiVersion): incidentManagementConfiguration.type=$IncidentPlatform,
       knowledgeGraphConfiguration.managedResources=<resource group>.
     * Data plane (agentmemory): uploaded + indexed the $($cfg.knowledge.Count) knowledge file(s).
+    * Data plane (extendedAgent/apply): $($cfg.customAgents.Count) custom (sub)agent(s).
+    * Data plane (incidentplayground): $($cfg.responsePlans.Count) response plan(s) (filter + handler).
 
-  STILL PORTAL (no stable programmatic envelope): custom agents, skills, response plans,
-  scheduled tasks. Portal: https://sre.azure.com/agent$($agent.id)
+  STILL PORTAL (no stable programmatic envelope): skills, connectors, scheduled tasks.
+  Portal: https://sre.azure.com/agent$($agent.id)
 "@ -ForegroundColor Gray
 
 if ($issues -gt 0) { exit 2 } else { exit 0 }

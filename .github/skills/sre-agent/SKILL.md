@@ -159,12 +159,16 @@ if ($resultMsg -match '(?s)\[stdout\]\s*(.*?)\s*\[stderr\]') {
 ## SRE Agent Configuration
 
 ### Two configuration planes (important)
-The agent's config spans two planes. The **GA `2026-01-01` ARM API** and the
-**data-plane agentmemory API** make most of it programmatic; a few objects are still portal-only:
+The agent's config spans two planes. The **GA `2026-01-01` ARM API** and the agent
+**data-plane API** now make essentially all of it programmatic; only a few extras are portal-only:
 - **Control plane (ARM `2026-01-01`, GA)**: the agent resource, managed identity + RBAC, mode/access, default model, `knowledgeGraphConfiguration.managedResources` (Azure RG scopes), and `incidentManagementConfiguration.type` (Azure Monitor incident integration — for `AzMonitor` no credentials are needed; alerts from the managed resources flow in via the agent's managed identity).
-- **Data plane (agent endpoint `https://<name>.<region>.azuresre.ai`, token audience `https://azuresre.dev`)**: knowledge base upload/index via `POST /api/v1/agentmemory/upload` (multipart, **form field name `files`**, repeatable), status at `/api/v1/agentmemory/status` and `/api/v1/agentmemory/indexer-status`.
-- **Still portal-only (`sre.azure.com`)**: custom (sub)agents, skills, incident response plans, scheduled tasks. The data-plane `/api/v2/extendedAgent/{agents,connectors,skills,...}` envelope is undocumented/portal-SPA-internal, and the ARM `subagents` sub-resource is gated ("Agent Extensions are not available for this tenant. This feature is restricted to internal tenants only.").
-- `scripts/configure-sre-agent.ps1 -Apply` **applies** the automatable config: ARM PATCH for `incidentManagementConfiguration.type=AzMonitor` + `knowledgeGraphConfiguration.managedResources=[<rg>]`, then uploads + indexes every `knowledge:` file from `config.yaml`. Without `-Apply` it is read-only (validate + report + portal checklist). Requires Python + PyYAML. **`deploy.ps1` now calls it with `-Apply` automatically** (post-deployment, gated by `-DeploySreAgent`), so a fresh provision leaves Azure Monitor connected + the knowledge base indexed.
+- **Data plane (agent endpoint `https://<name>.<region>.azuresre.ai`, token audience `https://azuresre.dev`)** — all now scripted:
+  - knowledge base upload/index via `POST /api/v1/agentmemory/upload` (multipart, **form field name `files`**, repeatable), status at `/api/v1/agentmemory/status` and `/api/v1/agentmemory/indexer-status`.
+  - custom (sub)agents via `PUT /api/v1/extendedAgent/apply` (AgentConfiguration YAML, `Content-Type: application/x-yaml` → HTTP 202); list at `GET /api/v1/extendedAgent/agents`.
+  - incident response plans = a **filter** (`PUT /api/v1/incidentplayground/filters/{id}`) bound to a custom-agent **handler** (`PUT /api/v1/incidentplayground/handlers/{id}`); `PUT` creates, `POST` updates; list at `GET /api/v2/incidentManagement/incidentFilters` and `GET /api/v2/extendedAgent/incidentHandlers`.
+  - **Data-plane gotchas** (handled by the script): every request needs `Accept: application/json`; JSON bodies must have **no UTF-8 BOM**; the filter `titleNotContains` must be a JSON **array** (not a string) and must omit `incidentPlatform` — a string/BOM/PUT-mid-upgrade all surface as a misleading **HTTP 405** static-handler response.
+- **Still portal-only (`sre.azure.com`)**: skills, connectors (data sources), scheduled tasks. (The ARM `subagents` sub-resource is separately gated to internal tenants, but the `extendedAgent/apply` data-plane path above sidesteps it for sub-agents.)
+- `scripts/configure-sre-agent.ps1 -Apply` **applies the whole loop**: ARM PATCH for `incidentManagementConfiguration.type=AzMonitor` + `knowledgeGraphConfiguration.managedResources=[<rg>]`, uploads + indexes every `knowledge:` file, applies each `customAgents:` sub-agent, and creates each `responsePlans:` filter+handler — all idempotent. Without `-Apply` it is read-only (validate + report). Requires Python + PyYAML. **`deploy.ps1` now calls it with `-Apply` automatically** (post-deployment, gated by `-DeploySreAgent`), so a fresh provision leaves the full closed loop configured.
 - **Caveat — portal "incident platform" view:** setting `incidentManagementConfiguration.type=AzMonitor` via ARM is confirmed in the resource, but the `sre.azure.com` portal's incident-platform panel may still render as "not connected" (it appears to read/wire additional data-plane state / an action-group the portal provisions). Alert-driven flow via `managedResources` still works; complete the portal "Connect" step if the panel matters.
 
 ### What makes a "working" agent (detect → investigate → root-cause → fix)
@@ -180,7 +184,7 @@ prints a **Working-agent readiness** section that checks the automatable ones.
 | **Investigate** | Read telemetry (logs/metrics) | Reader + Log Analytics Reader + Monitoring Reader on RG | ✅ bicep |
 | **Investigate** | Run diagnostics (`az`, `az vm run-command`) | Contributor (accessLevel=High) | ✅ bicep |
 | **Investigate** | Domain context | Knowledge base (17 files) | ✅ `-Apply` (agentmemory) |
-| **Root-cause** | Route incident to the right expert | **Incident response plan** (Builder > Incident response plans) | ❌ **portal-only, REQUIRED** |
+| **Root-cause** | Route incident to the right expert | **Incident response plan** (filter + handler → sub-agent) | ✅ `configure-sre-agent.ps1 -Apply` |
 | **Fix** | Write access | Contributor + Network Contributor | ✅ bicep |
 | **Fix** | Autonomy | `mode=Review` (propose+approve) or `Autonomous` (hands-off) — `sreAgentMode` param | ✅ bicep param |
 
@@ -190,11 +194,11 @@ with its managed identity (needs Monitoring Contributor on the subscription) —
 human email. Scanner facts: 250 alerts/call, 1-day initial lookback, repeated firings of the
 same rule merge into one thread, status re-syncs every 5 min. Docs: `learn.microsoft.com/azure/sre-agent/azure-monitor-alerts`.
 
-**The one thing that still blocks the closed loop:** at least one **incident response plan**
-(portal-only). Without it the agent detects+opens threads but does not auto-route/act. The
-plans are declared in `config.yaml` (`connectivity-failure`, `latency-degradation`); create
-them in `sre.azure.com` (Builder > Incident response plans) mapping severity → custom agent →
-autonomy. Docs: `learn.microsoft.com/azure/sre-agent/incident-response-plans`.
+**Closing the loop is now automated:** `configure-sre-agent.ps1 -Apply` creates the custom
+(sub)agents and at least one **incident response plan** on the data plane. Without a plan the
+agent detects+opens threads but does not auto-route/act. The plans are declared in
+`config.yaml` (`connectivity-failure` → Sev1/Sev2, `latency-degradation` → Sev4), each applied
+as a filter+handler routed to the `network-expert` sub-agent. Docs: `learn.microsoft.com/azure/sre-agent/incident-response-plans`.
 
 ### Agent resource
 - API: `Microsoft.App/agents@2025-05-01-preview` (bicep); GA `2026-01-01` used by `configure-sre-agent.ps1`
@@ -273,5 +277,6 @@ Also delete: SRE agent (if in separate RG), connection monitors in NetworkWatche
 | Containerlab host-veth wiring (T3) missing after a **reboot** of an existing clab VM | `/usr/local/bin/onprem-clab-up.sh` is baked by cloud-init `write_files` **once** at first boot; re-running it pulls fresh topology from git but does **not** rewrite the script, so newer host-veth lines are absent | The committed IaC is correct for a **fresh** clab VM deploy. On an existing VM, re-apply the veth IP + route manually (base64 run-command). |
 | CM portal status shows **Unknown** but LAW has recent rows | Source VMs **deallocated** → NW agents stopped probing → no fresh rollup (LAW retains historical rows) | Start the source VMs; not a config fault |
 | `onprem-to-webapp` CM broken / TM endpoints **Degraded** | Both hub **App Gateways were Stopped** (cost-saving, like deallocated VMs) → TM health probes fail | `az network application-gateway start -g netsre-rg -n netsre-hub{1,2}-appgw`; TM endpoints return **Online** and the test recovers |
-| SRE agent has no knowledge / connectors after deploy | Older `deploy.ps1` deployed only the agent **resource** | Fixed: `deploy.ps1` now runs `configure-sre-agent.ps1 -Apply` post-deploy (Azure Monitor + knowledge). Re-run it manually if it was skipped. Sub-agents/skills/response-plans/scheduled-tasks remain portal-only |
+| SRE agent has no knowledge / sub-agents / response plans after deploy | Older `deploy.ps1` deployed only the agent **resource** | Fixed: `deploy.ps1` now runs `configure-sre-agent.ps1 -Apply` post-deploy (Azure Monitor + knowledge + sub-agents + response plans). Re-run it manually if it was skipped. Skills/connectors/scheduled-tasks remain portal-only |
+| Data-plane `PUT` returns **HTTP 405** (filters/handlers/apply) | UTF-8 BOM in the JSON body, `titleNotContains` sent as a string not an array, or the agent is mid-upgrade | Write JSON with no BOM (`[IO.File]::WriteAllText`), pass `titleNotContains:[]`, send `Accept: application/json`; if mid-upgrade, re-run `-Apply` once `provisioningState=Succeeded` |
 | `az --query "length(@)"` errors `-o was unexpected at this time` (PowerShell) | cmd mangles the `(@)` | Use `(az ... -o json | ConvertFrom-Json).Count` |

@@ -29,10 +29,10 @@ If you're new to the on-prem extension, read these in order:
 
 4. **[SRE Agent configuration — how it works](./sre-agent-configuration.md)**
    How the deployed SRE Agent *resource* becomes a **working** agent: the two config
-   planes (programmatic ARM + data-plane vs. portal-only), the incident **detection**
-   model (1-minute Alerts-API scan), the detect → investigate → root-cause → fix
-   requirements, how `configure-sre-agent.ps1 -Apply` applies it, and the remaining
-   portal-only step (incident response plan).
+   planes (programmatic ARM + data plane), the incident **detection** model (1-minute
+   Alerts-API scan), the detect → investigate → root-cause → fix requirements, and how
+   `configure-sre-agent.ps1 -Apply` applies the whole loop — including the custom
+   (sub)agents and incident response plans via the data-plane API.
 
 5. **[How the SRE Agent consumes on-prem telemetry & closes the loop](./sre-agent-telemetry-and-actuation.md)**
    What the agent *does* with the telemetry: the read path (KQL/metrics enrichment,
