@@ -115,7 +115,7 @@ section.
 | **Detect** | Agent scoped to the resources | `knowledgeGraphConfiguration.managedResources=[<rg>]` | ✅ script / bicep |
 | **Investigate** | Read telemetry (logs / metrics) | Reader + Log Analytics Reader + Monitoring Reader on RG | ✅ bicep |
 | **Investigate** | Run diagnostics (`az`, `az vm run-command`) | Contributor (`accessLevel=High`) | ✅ bicep |
-| **Investigate** | Domain context | Knowledge base (17 files) | ✅ `-Apply` (agentmemory) |
+| **Investigate** | Domain context | Knowledge base (18 files) | ✅ `-Apply` (agentmemory) |
 | **Root-cause** | Route incident to the right expert | **Incident response plan** (filter + handler → sub-agent) | ✅ `configure-sre-agent.ps1 -Apply` |
 | **Fix** | Write access | Contributor + Network Contributor | ✅ bicep |
 | **Fix** | Autonomy | `mode=Review` (propose + approve) or `Autonomous` (hands-off) — `sreAgentMode` param | ✅ bicep param |
@@ -194,15 +194,18 @@ repo and verified by the readiness script:
 ```
 
 The script reads the declarative manifest [`sre-agent-config/config.yaml`](../sre-agent-config/config.yaml)
-(agent name/RG, the 17 `knowledge:` files, custom agents, skills, response plans, scheduled
+(agent name/RG, the 18 `knowledge:` files, custom agents, skills, response plans, scheduled
 tasks). It requires **Python + PyYAML** to parse the manifest.
 
 ### What `-Apply` configures for you
 - Control plane: `incidentManagementConfiguration.type=AzMonitor` + knowledge-graph scope.
 - Data plane: uploads + indexes the knowledge base, applies the **custom (sub)agents**
   (`network-expert`, `connectivity-triage`), and creates the **incident response plans**
-  (`connectivity-failure` → Sev1/Sev2, `latency-degradation` → Sev4), each as a filter +
-  handler routed to a sub-agent. Re-runs are idempotent (`PUT` create → `POST` update).
+  (`connectivity-failure` → Sev1/Sev2, `onprem-fabric-clab` → clab CM failures,
+  `onprem-fabric-syslog` → on-prem device syslog/telemetry alerts, `latency-degradation` →
+  Sev4), each as a filter + handler routed to a sub-agent. The on-prem plans carry a
+  multi-step `processingGuide` mirroring the `onprem-fabric-triage` skill. Re-runs are
+  idempotent (`PUT` create → `POST` update).
 
 ### Optional portal steps
 These improve investigation quality but are not required for the loop: add **skills**, add

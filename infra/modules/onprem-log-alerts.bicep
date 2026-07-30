@@ -55,7 +55,7 @@ resource syslogCriticalAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-
   kind: 'LogAlert'
   properties: {
     displayName: '${prefix}-onprem-syslog-critical'
-    description: 'On-prem device syslog reported an error-or-worse event (FRR/interface/BGP/kernel).'
+    description: 'On-prem device syslog reported an error-or-worse event (FRR/interface/BGP/kernel). Fires per device (HostName) and subsystem (ProcessName: bgpd/ospfd/zebra/kernel).'
     severity: 2
     enabled: true
     scopes: [ logAnalyticsWorkspaceId ]
@@ -68,6 +68,28 @@ resource syslogCriticalAlert 'Microsoft.Insights/scheduledQueryRules@2023-03-15-
           timeAggregation: 'Count'
           operator: 'GreaterThan'
           threshold: 0
+          // Split the alert by device (HostName) and subsystem (ProcessName, e.g.
+          // bgpd / ospfd / zebra / kernel) so the fired alert names WHICH device and
+          // WHICH daemon logged the error. These are low-cardinality. The exact
+          // message body is retrieved by the response plan's processing guide
+          // (Step 1) rather than carried as a high-cardinality dimension.
+          dimensions: [
+            {
+              name: 'HostName'
+              operator: 'Include'
+              values: [ '*' ]
+            }
+            {
+              name: 'ProcessName'
+              operator: 'Include'
+              values: [ '*' ]
+            }
+            {
+              name: 'SeverityLevel'
+              operator: 'Include'
+              values: [ '*' ]
+            }
+          ]
           failingPeriods: {
             numberOfEvaluationPeriods: 1
             minFailingPeriodsToAlert: 1

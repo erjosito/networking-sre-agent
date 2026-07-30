@@ -42,6 +42,9 @@ param(
         "peering-disconnect", "peering-no-gateway-transit", "peering-no-use-remote-gw",
         "appgw-probe-misconfigure",
         "pe-nsg-block", "pe-dns-break", "pe-route-missing", "pe-dns-override",
+        "clab-ospf-area-mismatch", "clab-ospf-mtu-mismatch", "clab-ospf-network-type-mismatch",
+        "clab-bgp-session-down", "clab-lan-route-withdraw", "clab-bgp-prefix-filter",
+        "clab-transit-link-down",
         "multi-fault"
     )]
     [string]$Scenario,
@@ -86,6 +89,13 @@ if ($List) {
         @{ Name = "pe-route-missing";            Category = "Private Link"; Description = "Remove PE subnet UDR from spoke11 route table (traffic bypasses NVA)" }
         @{ Name = "pe-dns-override";            Category = "Private Link"; Description = "Set spoke VNet DNS to Azure default and reboot VM — PE FQDN resolves to public IP while all other connectivity stays healthy" }
         @{ Name = "appgw-probe-misconfigure";   Category = "AppGW";        Description = "Set AppGW health probe host to 127.0.0.1 (backends become Unhealthy)" }
+        @{ Name = "clab-ospf-area-mismatch";    Category = "Containerlab"; Description = "OSPF area mismatch on r1 transit (area 0->1) — adjacency drops, loopbacks withdrawn (silent IGP fault; clab CM stays green)" }
+        @{ Name = "clab-ospf-mtu-mismatch";     Category = "Containerlab"; Description = "OSPF interface MTU mismatch on r1 eth1 (1500->1400) — adjacency stuck in ExStart/Exchange (silent; clab CM stays green)" }
+        @{ Name = "clab-ospf-network-type-mismatch"; Category = "Containerlab"; Description = "OSPF network-type mismatch on r1 eth1 (p2p->broadcast) — adjacency never reaches FULL (silent; clab CM stays green)" }
+        @{ Name = "clab-bgp-session-down";      Category = "Containerlab"; Description = "Shut r1->r2 eBGP neighbor — LAN 172.31.20.0/24 withdrawn, clab CM fails" }
+        @{ Name = "clab-lan-route-withdraw";    Category = "Containerlab"; Description = "Remove r2 'network 172.31.20.0/24' from BGP — LAN route withdrawn while session stays Established, clab CM fails" }
+        @{ Name = "clab-bgp-prefix-filter";     Category = "Containerlab"; Description = "Apply r2 outbound route-map denying the LAN toward r1 — session Established but LAN not advertised, clab CM fails (subtle policy fault)" }
+        @{ Name = "clab-transit-link-down";     Category = "Containerlab"; Description = "Shut r1 eth1 transit — OSPF+BGP both down, LAN unreachable, clab CM fails" }
         @{ Name = "multi-fault";                Category = "Combo";         Description = "Inject multiple faults simultaneously" }
     )
 
@@ -133,6 +143,7 @@ $Spoke11ToHub1    = "spoke11-to-$Hub1Vnet"
 $Hub1NvaLb        = "$Prefix-hub1-nva-lb"
 $Hub1NvaLbFe      = "nva-frontend"
 $OnpremVnet       = "$Prefix-onprem-vnet"
+$ClabVm           = "$Prefix-onprem-clab"
 $DefaultRouteName = "default-to-nva"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -156,6 +167,45 @@ function Invoke-AzSafe {
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "Command returned non-zero exit code (idempotent, continuing)"
     }
+}
+
+# Run a bash script inside the containerlab lab-host VM (netsre-onprem-clab).
+# The fabric routers are FRR containers reached via `docker exec ... vtysh`.
+# We base64-encode the script and decode it on the VM so that vtysh multi-`-c`
+# quoting survives the several shell layers of `az vm run-command` intact
+# (raw quoting has previously been corrupted and run unintended host commands).
+function Invoke-ClabBash {
+    param([string]$Script, [string]$Description = "containerlab command")
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Script))
+    Write-Info "clab: $Description"
+    az vm run-command invoke -g $ResourceGroup -n $ClabVm `
+        --command-id RunShellScript `
+        --scripts "echo $b64 | base64 -d | bash" -o none
+}
+
+# Apply FRR *configuration* lines to a container router. We feed the block into
+# `vtysh` over stdin (config-file semantics) rather than multiple `-c` flags:
+# a single vtysh invocation with many `-c` args does NOT reliably stay in config
+# mode across args, so prefix-lists/route-maps/neighbor policy silently fail to
+# commit. A heredoc walks the config nodes exactly like loading frr.conf.
+function Invoke-ClabVtyshConfig {
+    param([string]$Router, [string[]]$Config, [string]$Description)
+    $lines  = ($Config -join "`n")
+    $script = @"
+docker exec -i clab-onprem-onprem-$Router vtysh <<'CLABEOF'
+configure terminal
+$lines
+end
+CLABEOF
+"@
+    Invoke-ClabBash $script $Description
+}
+
+# Run enable-mode (non-config) vtysh commands, e.g. 'clear ip bgp ... out'.
+function Invoke-ClabVtyshExec {
+    param([string]$Router, [string[]]$Commands, [string]$Description)
+    $cArgs  = ($Commands | ForEach-Object { "-c '$_'" }) -join ' '
+    Invoke-ClabBash "docker exec clab-onprem-onprem-$Router vtysh $cArgs" $Description
 }
 
 # ─── Scenario functions ─────────────────────────────────────────────────────
@@ -685,6 +735,123 @@ function Invoke-MultiFault {
     }
 }
 
+# ─── Containerlab (on-prem FRR fabric) scenarios ─────────────────────────────
+# r1 = clab-onprem-onprem-r1 (WAN edge, AS65101, lo 10.99.1.1)
+# r2 = clab-onprem-onprem-r2 (core,     AS65102, lo 10.99.2.2, owns LAN 172.31.20.0/24)
+# OSPF (area 0) carries ONLY the loopbacks over the transit; BGP carries the LAN.
+# => OSPF-only faults are "silent" to the data path / clab Connection Monitor;
+#    BGP / transit-link faults withdraw the LAN and FAIL the clab CM.
+
+function Invoke-ClabOspfAreaMismatch {
+    if ($Revert) {
+        Invoke-ClabVtyshConfig -Router r1 -Config @('router ospf', 'no network 172.31.12.0/30 area 1', 'network 172.31.12.0/30 area 0') -Description "revert r1 transit OSPF area 1->0"
+        Write-Ok "r1 transit OSPF area restored to 0"
+    } else {
+        Write-Info "REASON: r1 advertises the transit into OSPF area 1 while r2 uses area 0 — adjacency cannot form across an area boundary."
+        Invoke-ClabVtyshConfig -Router r1 -Config @('router ospf', 'no network 172.31.12.0/30 area 0', 'network 172.31.12.0/30 area 1') -Description "inject r1 transit OSPF area 0->1"
+        Write-Ok "r1 transit OSPF area changed to 1"
+        Write-Impact "Within ~40s (dead interval) the r1<->r2 OSPF adjacency drops; peer loopback (O 10.99.2.2/32) is withdrawn and loopback reachability fails."
+        Write-Impact "SILENT to the data plane: BGP-carried LAN 172.31.20.0/24 stays up, so netsre-clab-connection-monitor stays GREEN. Detect via 'show ip ospf neighbor' (empty) + missing loopback route."
+    }
+}
+
+function Invoke-ClabOspfMtuMismatch {
+    if ($Revert) {
+        Invoke-ClabBash "docker exec clab-onprem-onprem-r1 ip link set dev eth1 mtu 1500" "revert r1 eth1 MTU 1400->1500"
+        Write-Ok "r1 eth1 MTU restored to 1500"
+    } else {
+        Write-Info "REASON: r1 eth1 MTU is lowered to 1400 while r2 eth1 stays 1500 — OSPF Database Description packets mismatch and the adjacency never completes."
+        Invoke-ClabBash "docker exec clab-onprem-onprem-r1 ip link set dev eth1 mtu 1400" "inject r1 eth1 MTU 1500->1400"
+        Write-Ok "r1 eth1 MTU set to 1400"
+        Write-Impact "The r1<->r2 OSPF adjacency gets stuck in ExStart/Exchange (never FULL); peer loopback is not learned."
+        Write-Impact "SILENT to the data plane: LAN 172.31.20.0/24 (BGP) stays up, clab CM stays GREEN. Detect via 'show ip ospf neighbor' state ExStart/Exchange + 'show interface eth1' MTU."
+    }
+}
+
+function Invoke-ClabOspfNetworkTypeMismatch {
+    if ($Revert) {
+        Invoke-ClabVtyshConfig -Router r1 -Config @('interface eth1', 'ip ospf network point-to-point') -Description "revert r1 eth1 OSPF network type -> point-to-point"
+        Write-Ok "r1 eth1 OSPF network type restored to point-to-point"
+    } else {
+        Write-Info "REASON: r1 eth1 OSPF network type is changed to broadcast while r2 stays point-to-point — mismatched adjacency handling prevents a FULL neighbor state."
+        Invoke-ClabVtyshConfig -Router r1 -Config @('interface eth1', 'ip ospf network broadcast') -Description "inject r1 eth1 OSPF network type -> broadcast"
+        Write-Ok "r1 eth1 OSPF network type set to broadcast"
+        Write-Impact "The r1<->r2 OSPF adjacency fails to reach FULL; peer loopback is withdrawn."
+        Write-Impact "SILENT to the data plane: LAN 172.31.20.0/24 (BGP) stays up, clab CM stays GREEN. Detect via 'show ip ospf interface eth1' (Network Type) + 'show ip ospf neighbor'."
+    }
+}
+
+function Invoke-ClabBgpSessionDown {
+    if ($Revert) {
+        Invoke-ClabVtyshConfig -Router r1 -Config @('router bgp 65101', 'no neighbor 172.31.12.2 shutdown') -Description "revert r1 eBGP neighbor shutdown"
+        Write-Ok "r1->r2 eBGP neighbor re-enabled"
+    } else {
+        Write-Info "REASON: administratively shutting the r1->r2 eBGP neighbor tears down the session that carries the on-prem LAN."
+        Invoke-ClabVtyshConfig -Router r1 -Config @('router bgp 65101', 'neighbor 172.31.12.2 shutdown') -Description "inject r1 eBGP neighbor shutdown"
+        Write-Ok "r1->r2 eBGP neighbor shut down"
+        Write-Impact "BGP session drops to Idle (Admin); LAN 172.31.20.0/24 is withdrawn from r1 ('% Network not in table')."
+        Write-Impact "FAILS the data path: netsre-clab-connection-monitor sees 100% loss -> fires netsre-clab-cm-checks-failed (Sev2) / netsre-clab-cm-test-result-fail (Sev1)."
+    }
+}
+
+function Invoke-ClabLanRouteWithdraw {
+    if ($Revert) {
+        Invoke-ClabVtyshConfig -Router r2 -Config @('router bgp 65102', 'address-family ipv4 unicast', 'network 172.31.20.0/24') -Description "revert r2 BGP network 172.31.20.0/24"
+        Write-Ok "r2 re-advertises LAN 172.31.20.0/24"
+    } else {
+        Write-Info "REASON: removing the 'network 172.31.20.0/24' statement stops r2 originating the LAN while the BGP session stays Established — a subtle 'route missing, session up' fault."
+        Invoke-ClabVtyshConfig -Router r2 -Config @('router bgp 65102', 'address-family ipv4 unicast', 'no network 172.31.20.0/24') -Description "inject r2 remove BGP network 172.31.20.0/24"
+        Write-Ok "r2 no longer advertises LAN 172.31.20.0/24"
+        Write-Impact "BGP session stays Established but r1 no longer has 172.31.20.0/24; the LAN becomes unreachable."
+        Write-Impact "FAILS the data path: clab CM fails -> netsre-clab-cm-checks-failed / netsre-clab-cm-test-result-fail. Distinguish from clab-bgp-session-down via 'show bgp summary' (Established) vs neighbor Idle."
+    }
+}
+
+function Invoke-ClabBgpPrefixFilter {
+    if ($Revert) {
+        Invoke-ClabVtyshConfig -Router r2 -Config @(
+            'router bgp 65102',
+            'address-family ipv4 unicast',
+            'no neighbor 172.31.12.1 route-map RM-DENY-LAN out',
+            'exit',
+            'exit',
+            'no route-map RM-DENY-LAN permit 20',
+            'no route-map RM-DENY-LAN deny 10',
+            'no ip prefix-list PL-LAN seq 5 permit 172.31.20.0/24'
+        ) -Description "revert r2 outbound LAN route-map filter"
+        Invoke-ClabVtyshExec -Router r2 -Commands @('clear ip bgp 172.31.12.1 out') -Description "soft-clear r2 outbound to r1"
+        Write-Ok "r2 outbound route-map filter removed; LAN re-advertised to r1"
+    } else {
+        Write-Info "REASON: an outbound route-map on r2 denies the LAN prefix toward r1. The BGP session stays Established but the LAN is filtered out of the advertisement — a policy fault, not a session fault."
+        Invoke-ClabVtyshConfig -Router r2 -Config @(
+            'ip prefix-list PL-LAN seq 5 permit 172.31.20.0/24',
+            'route-map RM-DENY-LAN deny 10',
+            'match ip address prefix-list PL-LAN',
+            'route-map RM-DENY-LAN permit 20',
+            'router bgp 65102',
+            'address-family ipv4 unicast',
+            'neighbor 172.31.12.1 route-map RM-DENY-LAN out'
+        ) -Description "inject r2 outbound LAN route-map filter"
+        Invoke-ClabVtyshExec -Router r2 -Commands @('clear ip bgp 172.31.12.1 out') -Description "soft-clear r2 outbound to r1"
+        Write-Ok "r2 outbound route-map now denies 172.31.20.0/24 toward r1"
+        Write-Impact "BGP session stays Established (show bgp summary shows peer Up) but r1 never receives 172.31.20.0/24; the LAN is unreachable."
+        Write-Impact "FAILS the data path: clab CM fails. Root cause is ONLY visible via 'show bgp neighbor 172.31.12.1 advertised-routes' on r2 (empty) + the outbound route-map — telemetry/session state look healthy."
+    }
+}
+
+function Invoke-ClabTransitLinkDown {
+    if ($Revert) {
+        Invoke-ClabBash "docker exec clab-onprem-onprem-r1 ip link set dev eth1 up" "revert r1 eth1 transit link up"
+        Write-Ok "r1 eth1 transit link brought up"
+    } else {
+        Write-Info "REASON: administratively downing r1 eth1 severs the only transit link — both OSPF and BGP over it drop simultaneously."
+        Invoke-ClabBash "docker exec clab-onprem-onprem-r1 ip link set dev eth1 down" "inject r1 eth1 transit link down"
+        Write-Ok "r1 eth1 transit link brought down"
+        Write-Impact "Both the OSPF adjacency and the eBGP session go down; peer loopback AND the LAN 172.31.20.0/24 are withdrawn."
+        Write-Impact "FAILS the data path: clab CM fails -> netsre-clab-cm-checks-failed / netsre-clab-cm-test-result-fail. Distinguish from control-plane-only faults via 'show interface eth1' (link down / protocol down)."
+    }
+}
+
 # ─── Dispatcher ──────────────────────────────────────────────────────────────
 function Invoke-Scenario {
     param([string]$Name, [bool]$IsRevert = $false)
@@ -718,6 +885,13 @@ function Invoke-Scenario {
             "pe-route-missing"         { Invoke-PeRouteMissing }
             "pe-dns-override"          { Invoke-PeDnsOverride }
             "appgw-probe-misconfigure" { Invoke-AppgwProbeMisconfigure }
+            "clab-ospf-area-mismatch"        { Invoke-ClabOspfAreaMismatch }
+            "clab-ospf-mtu-mismatch"         { Invoke-ClabOspfMtuMismatch }
+            "clab-ospf-network-type-mismatch" { Invoke-ClabOspfNetworkTypeMismatch }
+            "clab-bgp-session-down"          { Invoke-ClabBgpSessionDown }
+            "clab-lan-route-withdraw"        { Invoke-ClabLanRouteWithdraw }
+            "clab-bgp-prefix-filter"         { Invoke-ClabBgpPrefixFilter }
+            "clab-transit-link-down"         { Invoke-ClabTransitLinkDown }
             "multi-fault"              { Invoke-MultiFault }
         }
     } finally {

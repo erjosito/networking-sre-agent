@@ -5,8 +5,8 @@ A ready-to-deploy Azure lab that builds a **multi-hub, hub-spoke network topolog
 The repository includes:
 
 - **Bicep infrastructure-as-code** for the full topology (hub/spoke networking, VPN, NVA, Private Link, AppGW, Traffic Manager)
-- **Knowledge base documents** (13 files) that teach the SRE Agent about Azure networking
-- **Fault-injection scripts** with 26 scenarios across 6 failure categories
+- **Knowledge base documents** (17 files) that teach the SRE Agent about Azure and on-premises networking
+- **Fault-injection scripts** with 33 scenarios across 7 failure categories (incl. an on-prem containerlab FRR fabric)
 - **Connection Monitors & alerts** covering 11 test groups to trigger the SRE Agent automatically
 - **Health check script** (20 validation sections) for end-to-end environment verification
 - **SRE Agent configuration artifacts** (custom agents, skills, response plans)
@@ -154,7 +154,7 @@ Simulate real-world networking failures to exercise the SRE Agent's investigatio
 .\scripts\inject-fault.ps1 -Scenario multi-fault
 ```
 
-### Available Scenarios (26 total)
+### Available Scenarios (33 total)
 
 #### IP Forwarding (2 scenarios)
 
@@ -226,6 +226,23 @@ Simulate real-world networking failures to exercise the SRE Agent's investigatio
 | Scenario | Description | Impact |
 |----------|-------------|--------|
 | `multi-fault` | Inject multiple random faults simultaneously | Complex multi-root-cause investigation |
+
+#### Containerlab — on-prem FRR fabric (7 scenarios)
+
+Target the FRR containers on the `netsre-onprem-clab` VM (r1 ⇄ r2 over the transit link).
+OSPF area 0 carries only loopbacks; the LAN `172.31.20.0/24` is BGP-carried — so OSPF-only
+faults are "silent" (the clab Connection Monitor stays green; they may fire the syslog alert),
+while BGP/link faults withdraw the LAN and trip the Connection Monitor alert.
+
+| Scenario | Description | Impact |
+|----------|-------------|--------|
+| `clab-ospf-area-mismatch` | Change r1's transit OSPF area 0 → 1 | Adjacency drops; loopbacks unreachable, LAN + CM stay green (syslog signal) |
+| `clab-ospf-mtu-mismatch` | Set r1 eth1 MTU 1500 → 1400 | OSPF stuck in ExStart/Exchange; loopbacks unreachable, LAN green |
+| `clab-ospf-network-type-mismatch` | Flip r1 eth1 OSPF network type point-to-point → broadcast | Adjacency fails to form; loopbacks unreachable, LAN green |
+| `clab-bgp-session-down` | Shut down r1's eBGP neighbor to r2 | LAN `172.31.20.0/24` withdrawn; Connection Monitor fails |
+| `clab-lan-route-withdraw` | Remove `network 172.31.20.0/24` from r2 BGP | LAN no longer originated; CM fails while the session stays up |
+| `clab-bgp-prefix-filter` | Apply an outbound route-map on r2 denying the LAN | LAN filtered; **BGP session stays Established** (policy fault) |
+| `clab-transit-link-down` | `ip link set eth1 down` on r1 | Transit link + OSPF + BGP all drop; LAN unreachable, CM fails |
 
 ---
 
@@ -392,7 +409,7 @@ Validate the entire environment with a comprehensive 20-section health check:
 networking-sre-agent/
 ├── README.md
 ├── .gitignore
-├── knowledge/                           # SRE Agent knowledge base (13 files)
+├── knowledge/                           # SRE Agent knowledge base (17 files)
 │   ├── azure-networking-fundamentals.md
 │   ├── hub-spoke-topology.md
 │   ├── vpn-expressroute-connectivity.md
@@ -424,7 +441,7 @@ networking-sre-agent/
 ├── scripts/                             # Deployment & operations (PowerShell)
 │   ├── deploy.ps1                       # Full deployment + post-deploy config
 │   ├── teardown.ps1                     # Resource group deletion
-│   ├── inject-fault.ps1                 # Fault injection (26 scenarios)
+│   ├── inject-fault.ps1                 # Fault injection (33 scenarios)
 │   ├── check-health.ps1                 # Environment health validation (20 sections)
 │   └── upload-knowledge.ps1             # Upload knowledge to SRE Agent
 ├── sre-agent-config/                    # SRE Agent configuration artifacts

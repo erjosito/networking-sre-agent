@@ -408,6 +408,33 @@ probes to (see `docs/onprem-network-simulation-and-telemetry.md`, Part D / §10)
 is in the control plane (BGP) but its effect is observable in the data plane (the LAN
 becomes unreachable), so a Connection Monitor–style probe would catch it.
 
+### Scripted fault catalog
+
+This fault (and six more) is now injectable through `scripts/inject-fault.ps1` under the
+**Containerlab** category — each with a clean `-Revert`:
+
+| Scenario | Layer | Trips the clab Connection Monitor? |
+|----------|-------|-----------------------------------|
+| `clab-ospf-area-mismatch` | OSPF (loopbacks only) | No — syslog signal only |
+| `clab-ospf-mtu-mismatch` | OSPF | No — syslog signal only |
+| `clab-ospf-network-type-mismatch` | OSPF | No — syslog signal only |
+| `clab-bgp-session-down` | BGP (LAN) | Yes |
+| `clab-lan-route-withdraw` | BGP origination | Yes |
+| `clab-bgp-prefix-filter` | BGP policy (session stays up) | Yes |
+| `clab-transit-link-down` | L1/L2 transit | Yes |
+
+```powershell
+.\scripts\inject-fault.ps1 -Scenario clab-bgp-session-down
+.\scripts\inject-fault.ps1 -Scenario clab-bgp-session-down -Revert
+```
+
+The script drives FRR via a **heredoc into `docker exec -i <node> vtysh`** rather than
+multiple `vtysh -c` flags — a single multi-`-c` invocation does *not* stay in config mode, so
+route-map/prefix-list edits silently fail to commit. The SRE Agent's matching triage
+procedure lives in the `onprem-fabric-triage` skill
+([`sre-agent-config/skills/onprem-fabric-triage/`](../sre-agent-config/skills/onprem-fabric-triage))
+and the `onprem-fabric-clab` / `onprem-fabric-syslog` response plans.
+
 ---
 
 ## 8. Gotcha: config files must use LF line endings

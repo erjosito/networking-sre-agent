@@ -58,5 +58,8 @@ If you're new to the on-prem extension, read these in order:
   `onprem-telemetry-and-observability`).
 - [`../infra/containerlab/README.md`](../infra/containerlab/README.md) — containerlab
   quick reference.
+- [`../sre-agent-config/skills/onprem-fabric-triage/`](../sre-agent-config/skills/onprem-fabric-triage) —
+  the on-prem fabric triage skill (signal-first, neighbor-aware OSPF/BGP control-plane
+  procedure) mirrored into the `onprem-fabric-clab` / `onprem-fabric-syslog` response plans.
 - [`../.github/skills/sre-agent/SKILL.md`](../.github/skills/sre-agent/SKILL.md) —
   operational playbook for working in this repo.

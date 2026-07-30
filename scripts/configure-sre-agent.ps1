@@ -341,9 +341,17 @@ foreach ($r in $cfg.responsePlans) {
 
     # Handler bound to the filter.
     $guide = ("" + $r.description) -replace '\\','\\' -replace '"','\"'
+    # Processing guide: prefer a multi-line `processingGuide` list (targeted, step-by-step)
+    # over the one-line description. Step 1 should always pull the exact triggering signal.
+    if ($r.processingGuide) {
+        $steps = @($r.processingGuide) | ForEach-Object { '"' + (("" + $_) -replace '\\','\\' -replace '"','\"') + '"' }
+        $guideArr = '[' + ($steps -join ',') + ']'
+    } else {
+        $guideArr = '["' + $guide + '"]'
+    }
     $handlerJson = '{"id":"' + $fid + '","name":"","description":"' + $guide +
-        '","incidentFilterId":"' + $fid + '","incidentProcessingGuide":["' + $guide +
-        '"],"tools":[],"incidents":[],"customInstructions":""}'
+        '","incidentFilterId":"' + $fid + '","incidentProcessingGuide":' + $guideArr +
+        ',"tools":[],"incidents":[],"customInstructions":""}'
     $htmp = Join-Path ([IO.Path]::GetTempPath()) ("sre-handler-" + $fid + ".json")
     [System.IO.File]::WriteAllText($htmp, $handlerJson)   # no BOM
     $hres = Invoke-DpUpsert "$endpoint/api/v1/incidentplayground/handlers/$fid" $htmp $dpApplyToken

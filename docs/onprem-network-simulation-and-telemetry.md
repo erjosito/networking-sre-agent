@@ -470,7 +470,17 @@ Getting data into Log Analytics is necessary but not sufficient — the agent ne
 
 ## 7. Part F — Fault injection for on-prem devices
 
-To keep parity with `scripts/inject-fault.ps1` (26 scenarios, each with a clean `-Revert`), add
+> **Status (implemented for the Containerlab fabric):** seven of these device-level faults are
+> now live in `scripts/inject-fault.ps1` under the **Containerlab** category and target the FRR
+> fabric on the `netsre-onprem-clab` VM (each with a clean `-Revert`):
+> `clab-ospf-area-mismatch`, `clab-ospf-mtu-mismatch`, `clab-ospf-network-type-mismatch`,
+> `clab-bgp-session-down`, `clab-lan-route-withdraw`, `clab-bgp-prefix-filter`,
+> `clab-transit-link-down`. The `onprem-fabric-triage` skill
+> (`sre-agent-config/skills/onprem-fabric-triage/`) plus the `onprem-fabric-clab` /
+> `onprem-fabric-syslog` response plans give the agent the matching signal-first, neighbor-aware,
+> control-plane triage procedure. The VM-based FRR/VXLAN scenarios below remain future work.
+
+To keep parity with `scripts/inject-fault.ps1` (33 scenarios, each with a clean `-Revert`), add
 on-prem device scenarios such as:
 
 - `onprem-bgp-shutdown` — `neighbor <ip> shutdown` in FRR/VyOS → BGP flap + syslog + Azure VPN BGP down.

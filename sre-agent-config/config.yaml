@@ -26,6 +26,9 @@ knowledge:
   - knowledge/onprem-telemetry-and-observability.md
   - knowledge/onprem-bgp-fault-runbook.md
   - knowledge/onprem-ospf-fault-runbook.md
+  # On-prem fabric triage procedure (also authored as a portal skill; uploaded here
+  # so the targeted procedure is retrievable even without the portal skill attached)
+  - sre-agent-config/skills/onprem-fabric-triage/SKILL.md
 
 # Custom agents (sub-agents)
 customAgents:
@@ -42,6 +45,8 @@ skills:
     directory: sre-agent-config/skills/vpn-bgp-diagnostics
   - name: private-endpoint-dns
     directory: sre-agent-config/skills/private-endpoint-dns
+  - name: onprem-fabric-triage
+    directory: sre-agent-config/skills/onprem-fabric-triage
 
 # Incident response plans
 responsePlans:
@@ -52,6 +57,34 @@ responsePlans:
     customAgent: network-expert
     autonomy: Review
     cooldownHours: 3
+    processingGuide:
+      - "Determine the failing layer FIRST: is this an Azure hub-spoke path or an on-premises fabric alert (title/resource contains 'onprem' or 'clab')?"
+      - "For on-premises/containerlab alerts, follow the on-prem-fabric-triage skill: pull the EXACT triggering signal (the syslog rows or the Connection Monitor test result) BEFORE assessing device health, then inspect OSPF/BGP control-plane state on the implicated device AND its neighbor."
+      - "For Azure hub-spoke alerts, follow the standard methodology: failing path -> DNS -> effective routes -> NVA health -> NSG -> VPN/BGP -> peering -> AppGW -> Private Endpoint."
+      - "Never conclude a device is healthy solely because it still emits telemetry (SNMP/Heartbeat/syslog) — a control-plane fault can break reachability while liveness signals stay green."
+  - name: onprem-fabric-clab
+    description: Route containerlab fabric Connection Monitor failures (r1<->r2 BGP/link faults) to the network expert with the on-prem triage procedure
+    severity: [Sev1, Sev2]
+    titleContains: "clab"
+    customAgent: network-expert
+    autonomy: Review
+    cooldownHours: 3
+    processingGuide: &onpremGuide
+      - "Use the on-prem-fabric-triage skill. STEP 1 (never skip): pull the EXACT triggering signal for the alert window. For a Connection Monitor alert, query NWConnectionMonitorTestResult for TestGroupName 'clabhost-to-infabric-server' (passed/failed by 1m). For a syslog alert, query Syslog | where Facility=='daemon' and SeverityLevel in ('error','critical','alert','emergency') | project TimeGenerated, HostName, ProcessName, SeverityLevel, SyslogMessage. Quote the actual message/failure."
+      - "STEP 2: from the alert's HostName/ProcessName dimensions and the syslog message, identify the device (onprem-r1 / onprem-r2) and subsystem (ospfd / bgpd / zebra/kernel), and classify the fault: adjacency/session down, stuck adjacency, or route missing while the session/adjacency is UP (a policy fault)."
+      - "STEP 3: inspect the CONTROL PLANE on the implicated device AND its neighbor over the transit — do not rely on reachability alone. Run via az vm run-command on VM netsre-onprem-clab using base64-encoded bash. OSPF: docker exec clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor' and 'show ip ospf interface eth1' on BOTH r1 and r2. BGP: 'show ip bgp summary' and 'show ip route 172.31.20.0/24' on r1, and 'show ip bgp neighbor 172.31.12.1 advertised-routes' on r2."
+      - "Blast radius: OSPF-only faults (area/MTU/network-type) break loopback reachability but leave the LAN 172.31.20.0/24 and the clab Connection Monitor GREEN. A clab CM alert therefore means a BGP or transit-link fault that withdrew the LAN. If BGP is Established but the LAN is absent on r1, the route is filtered/withdrawn — check r2 advertised-routes and any outbound route-map/prefix-list."
+      - "STEP 4 (recent changes): compare live 'show running-config' on r1 and r2 to the committed source of truth infra/containerlab/configs/{r1,r2}/frr.conf; review OnPremAAA_CL logins in the last 6h; widen the Syslog window and drop the severity filter to catch notice/info OSPF/BGP flaps leading up to the alert; check SNMP sysUpTime (onprem/snmp) for a reboot."
+      - "STEP 5: confirm the collector is alive (Heartbeat for Computer=='onprem-collector'); if missing, telemetry is stale, not healthy."
+      - "STEP 6 (remediate + verify): apply the fix for the identified fault (see scripts/inject-fault.ps1 clab-* scenarios for the exact vtysh inject/revert), then verify recovery: OSPF neighbor Full, BGP Established with PfxRcd 2, LAN route present on r1, and the Connection Monitor passing. Durable fixes belong in frr.conf."
+  - name: onprem-fabric-syslog
+    description: Route on-prem device syslog/telemetry alerts (incl. OSPF adjacency faults) to the network expert with the on-prem triage procedure
+    severity: [Sev1, Sev2, Sev3]
+    titleContains: "onprem"
+    customAgent: network-expert
+    autonomy: Review
+    cooldownHours: 3
+    processingGuide: *onpremGuide
   - name: latency-degradation
     description: Route high-latency alerts for investigation
     severity: [Sev4]

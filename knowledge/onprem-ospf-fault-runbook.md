@@ -34,11 +34,35 @@ demonstrate).
 
 ---
 
+## Step 0 — read the triggering signal first
+
+Before probing, pull the **exact syslog rows** that fired the alert (the
+`netsre-onprem-syslog-critical` alert now carries `HostName` + `ProcessName`
+dimensions, so it names the device and daemon):
+
+```kusto
+Syslog
+| where TimeGenerated > ago(20m)
+| where Facility == "daemon"
+| where SeverityLevel in ("error","critical","alert","emergency")
+| project TimeGenerated, HostName, ProcessName, SeverityLevel, SyslogMessage
+| order by TimeGenerated desc
+```
+
+Quote the actual message (e.g. `OSPF: nbr 10.99.2.2 down`) and let it target the
+device + interface you inspect below. Then check **recent changes on that device
+AND its neighbor**: compare live `show running-config` to
+`infra/containerlab/configs/{r1,r2}/frr.conf`, and review `OnPremAAA_CL` logins in
+the last 6h.
+
 ## Diagnosis (run on the clab VM)
 
 > Use `az vm run-command` with a **base64-encoded** bash script; multi-`-c`
 > `docker exec`/`vtysh` quoting is otherwise corrupted. Use
-> `vtysh -c 'configure terminal'`, never `conf t`.
+> `vtysh -c 'configure terminal'`, never `conf t`. **Read-only** `show` commands
+> work with a single `-c`; **configuration** changes must use a **heredoc into
+> `vtysh`** (a single vtysh call with multiple `-c 'configure terminal' -c …` flags
+> does NOT stay in config mode and silently fails to commit).
 
 ```bash
 R1=clab-onprem-onprem-r1; R2=clab-onprem-onprem-r2
@@ -83,11 +107,18 @@ Syslog
 
 ## Reproduce the fault (area mismatch)
 
+Preferred: `scripts/inject-fault.ps1 -Scenario clab-ospf-area-mismatch`
+(and `-Revert` to undo). It encodes the change correctly. Manual equivalent —
+note the **heredoc** (not multiple `-c` flags):
+
 ```bash
-docker exec clab-onprem-onprem-r1 vtysh -c 'configure terminal' \
-  -c 'router ospf' \
-  -c 'no network 172.31.12.0/30 area 0' \
-  -c 'network 172.31.12.0/30 area 1'
+docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
+configure terminal
+router ospf
+ no network 172.31.12.0/30 area 0
+ network 172.31.12.0/30 area 1
+end
+EOF
 ```
 
 Expected (~within dead interval, ≤40s): `show ip ospf neighbor` on r1 becomes
@@ -96,11 +127,16 @@ The BGP session and `172.31.20.0/24` are **unaffected**.
 
 ## Remediate / revert
 
+`scripts/inject-fault.ps1 -Scenario clab-ospf-area-mismatch -Revert`, or manually:
+
 ```bash
-docker exec clab-onprem-onprem-r1 vtysh -c 'configure terminal' \
-  -c 'router ospf' \
-  -c 'no network 172.31.12.0/30 area 1' \
-  -c 'network 172.31.12.0/30 area 0'
+docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
+configure terminal
+router ospf
+ no network 172.31.12.0/30 area 1
+ network 172.31.12.0/30 area 0
+end
+EOF
 ```
 
 Confirm: `show ip ospf neighbor` returns to **Full**; `O 10.99.2.2/32` reappears;

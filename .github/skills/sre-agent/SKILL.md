@@ -15,7 +15,7 @@ infra/main.bicep              — Top-level Bicep orchestration
 infra/modules/*.bicep         — Individual modules (hub, spoke, onprem, vpn-connections, private-link, appgw, traffic-manager, connection-monitors, alerts, sre-agent)
 scripts/deploy.ps1            — Full deployment + post-deploy config
 scripts/check-health.ps1      — 20-section environment validation
-scripts/inject-fault.ps1      — 26 fault scenarios across 6 categories
+scripts/inject-fault.ps1      — 33 fault scenarios across 7 categories (incl. 7 containerlab on-prem faults)
 scripts/upload-knowledge.ps1  — Print manual knowledge-upload instructions (portal; superseded by configure-sre-agent.ps1 -Apply)
 scripts/configure-sre-agent.ps1 — Apply agent config: ARM AzMonitor+scope (2026-01-01) + data-plane knowledge upload; -Apply to write, default report-only
 sre-agent-config/             — Agent config manifest, custom agents, skills
@@ -114,6 +114,7 @@ if ($resultMsg -match '(?s)\[stdout\]\s*(.*?)\s*\[stderr\]') {
 **Peering**: `peering-disconnect`, `peering-no-gateway-transit`, `peering-no-use-remote-gw`
 **Private Link**: `pe-nsg-block`, `pe-dns-break`, `pe-route-missing`, `pe-dns-override`
 **AppGW**: `appgw-probe-misconfigure`
+**Containerlab (on-prem FRR fabric)**: `clab-ospf-area-mismatch`, `clab-ospf-mtu-mismatch`, `clab-ospf-network-type-mismatch`, `clab-bgp-session-down`, `clab-lan-route-withdraw`, `clab-bgp-prefix-filter`, `clab-transit-link-down` — run `docker exec ... vtysh` on `netsre-onprem-clab` via base64-encoded bash; OSPF-only faults leave the clab Connection Monitor GREEN (loopbacks are OSPF-carried, the LAN is BGP-carried)
 **Combo**: `multi-fault`
 
 ### Design principles for fault scenarios
@@ -183,7 +184,7 @@ prints a **Working-agent readiness** section that checks the automatable ones.
 | **Detect** | Agent scoped to the resources | `knowledgeGraphConfiguration.managedResources=[<rg>]` | ✅ script/bicep |
 | **Investigate** | Read telemetry (logs/metrics) | Reader + Log Analytics Reader + Monitoring Reader on RG | ✅ bicep |
 | **Investigate** | Run diagnostics (`az`, `az vm run-command`) | Contributor (accessLevel=High) | ✅ bicep |
-| **Investigate** | Domain context | Knowledge base (17 files) | ✅ `-Apply` (agentmemory) |
+| **Investigate** | Domain context | Knowledge base (18 files, incl. the on-prem triage skill) | ✅ `-Apply` (agentmemory) |
 | **Root-cause** | Route incident to the right expert | **Incident response plan** (filter + handler → sub-agent) | ✅ `configure-sre-agent.ps1 -Apply` |
 | **Fix** | Write access | Contributor + Network Contributor | ✅ bicep |
 | **Fix** | Autonomy | `mode=Review` (propose+approve) or `Autonomous` (hands-off) — `sreAgentMode` param | ✅ bicep param |
@@ -214,7 +215,7 @@ as a filter+handler routed to the `network-expert` sub-agent. Docs: `learn.micro
 ### Configuration artifacts
 - `sre-agent-config/config.yaml` — declarative manifest (knowledge, agents, skills, response plans)
 - `sre-agent-config/custom-agents/` — network-expert and connectivity-triage agent definitions
-- `sre-agent-config/skills/` — NVA troubleshooting, VPN/BGP diagnostics, PE/DNS resolution guides
+- `sre-agent-config/skills/` — NVA troubleshooting, VPN/BGP diagnostics, PE/DNS resolution, and **onprem-fabric-triage** (containerlab OSPF/BGP control-plane triage) guides
 
 ## Connection Monitors
 
