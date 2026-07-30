@@ -600,10 +600,10 @@ Concrete decisions made while building the IaC (`infra/modules/onprem-*.bicep`,
   producing a client-side parse failure that manifests as a multi-minute *hang* (even with
   `--no-wait`) or `Unable to parse parameter`, with **zero deployments registered** in ARM. Template
   size is not the cause. `deploy.ps1` and `deploy-onprem.ps1` both build a parameters file.
-- **`main.bicep` requires `vpnSharedKey`** (no default; lab value `TestVpnKey2025!`) and, when
-  `deploySreAgent=true`, an **Entra sponsor group** (`sreAgentSponsorGroupId`). The sponsor group is
-  the Entra group named **`SRE`**, auto-discovered by `deploy.ps1`; deploy without the agent via
-  `-DeploySreAgent $false`.
+- **`main.bicep` requires `vpnSharedKey`** (no default; lab value `TestVpnKey2025!`). The SRE Agent
+  no longer needs a sponsor group / agent identity — it deploys with a `SystemAssigned, UserAssigned`
+  identity (avoids the per-tenant "not allowed to create agent identities" gate). Deploy without the
+  agent via `-DeploySreAgent $false`.
 - For long, unattended runs submit with `--no-wait` (survives a disconnected shell) and poll
   `az deployment group list` / `az deployment group wait`. 0 registered deployments after a submit ⇒
   a client-side parameter error, not slow ARM. Diagnose with `--debug` redirected to a file.

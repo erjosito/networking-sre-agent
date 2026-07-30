@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "13755741642658672977"
+      "templateHash": "8095872221668979935"
     }
   },
   "parameters": {
@@ -87,11 +87,11 @@
         "description": "SRE Agent mode: Review (propose+approve), Autonomous, or ReadOnly"
       }
     },
-    "sreAgentSponsorGroupId": {
+    "sreAgentModelName": {
       "type": "string",
-      "defaultValue": "",
+      "defaultValue": "Automatic",
       "metadata": {
-        "description": "Microsoft Entra group ID whose members can manage the SRE Agent (required when deploySreAgent=true)"
+        "description": "Default model for the SRE Agent. \"Automatic\" lets the service pick an available model in the region (recommended; avoids region-specific model availability failures)."
       }
     }
   },
@@ -206,6 +206,10 @@
               {
                 "name": "to-onprem",
                 "addressPrefix": "10.100.0.0/16"
+              },
+              {
+                "name": "to-pe-subnet",
+                "addressPrefix": "10.1.4.0/24"
               }
             ]
           },
@@ -1096,6 +1100,10 @@
               {
                 "name": "to-onprem",
                 "addressPrefix": "10.100.0.0/16"
+              },
+              {
+                "name": "to-pe-subnet",
+                "addressPrefix": "10.1.4.0/24"
               }
             ]
           },
@@ -4341,7 +4349,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "3088811011411120571"
+              "templateHash": "7833091897685477430"
             }
           },
           "parameters": {
@@ -4390,51 +4398,6 @@
                 "allowBlobPublicAccess": true,
                 "minimumTlsVersion": "TLS1_2"
               }
-            },
-            {
-              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
-              "apiVersion": "2023-01-31",
-              "name": "[format('{0}-upload-identity', parameters('prefix'))]",
-              "location": "[parameters('location')]"
-            },
-            {
-              "type": "Microsoft.Authorization/roleAssignments",
-              "apiVersion": "2022-04-01",
-              "scope": "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]",
-              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))), 'StorageBlobDataContributor')]",
-              "properties": {
-                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
-                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))), '2023-01-31').principalId]",
-                "principalType": "ServicePrincipal"
-              },
-              "dependsOn": [
-                "[resourceId('Microsoft.Storage/storageAccounts', variables('saName'))]",
-                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix')))]"
-              ]
-            },
-            {
-              "type": "Microsoft.Resources/deploymentScripts",
-              "apiVersion": "2023-08-01",
-              "name": "[format('{0}-upload-index-html', parameters('prefix'))]",
-              "location": "[parameters('location')]",
-              "kind": "AzureCLI",
-              "identity": {
-                "type": "UserAssigned",
-                "userAssignedIdentities": {
-                  "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))))]": {}
-                }
-              },
-              "properties": {
-                "azCliVersion": "2.52.0",
-                "retentionInterval": "PT1H",
-                "timeout": "PT5M",
-                "scriptContent": "      echo '<html><head><title>SRE Health Probe</title></head><body><h1>OK</h1><p>Private Endpoint connectivity verified.</p></body></html>' > index.html\r\n      az storage blob service-properties update --account-name $1 --static-website --index-document index.html --404-document index.html --auth-mode login\r\n      az storage blob upload --account-name $1 --container-name '$web' --name index.html --file index.html --overwrite --auth-mode login\r\n    ",
-                "arguments": "[variables('saName')]"
-              },
-              "dependsOn": [
-                "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts', variables('saName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix'))), 'StorageBlobDataContributor'))]",
-                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-upload-identity', parameters('prefix')))]"
-              ]
             },
             {
               "type": "Microsoft.Network/privateDnsZones",
@@ -5601,8 +5564,8 @@
           "agentMode": {
             "value": "[parameters('sreAgentMode')]"
           },
-          "initialSponsorGroupId": {
-            "value": "[parameters('sreAgentSponsorGroupId')]"
+          "defaultModelName": {
+            "value": "[parameters('sreAgentModelName')]"
           },
           "managedResourceGroupIds": {
             "value": [
@@ -5620,14 +5583,14 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "15350627609519539265"
+              "templateHash": "10361647294794805338"
             }
           },
           "parameters": {
             "location": {
               "type": "string",
               "metadata": {
-                "description": "Azure region — must be eastus2, swedencentral, or australiaeast"
+                "description": "Azure region for the SRE Agent. Verified working in eastus2 and canadacentral. NOTE: do NOT set an agentIdentity/initialSponsorGroupId — creating agent identities is gated per-tenant and was the original deployment blocker; this module uses a SystemAssigned + UserAssigned identity instead."
               }
             },
             "prefix": {
@@ -5659,12 +5622,6 @@
                 "description": "Agent mode: Review (propose+approve), Autonomous, or ReadOnly"
               }
             },
-            "initialSponsorGroupId": {
-              "type": "string",
-              "metadata": {
-                "description": "Microsoft Entra group ID for initial sponsor group (required for agent identity). Members of this group can manage the agent."
-              }
-            },
             "managedResourceGroupIds": {
               "type": "array",
               "defaultValue": [],
@@ -5687,6 +5644,13 @@
               ],
               "metadata": {
                 "description": "Upgrade channel for the agent"
+              }
+            },
+            "defaultModelName": {
+              "type": "string",
+              "defaultValue": "Automatic",
+              "metadata": {
+                "description": "Default model for the agent. Use \"Automatic\" to let the service pick an available model in the region (avoids region-specific model availability failures)."
               }
             }
           },
@@ -5722,7 +5686,7 @@
               "name": "[format('{0}-sre-agent', parameters('prefix'))]",
               "location": "[parameters('location')]",
               "identity": {
-                "type": "UserAssigned",
+                "type": "SystemAssigned, UserAssigned",
                 "userAssignedIdentities": {
                   "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix'))))]": {}
                 }
@@ -5737,9 +5701,6 @@
                   "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix')))]",
                   "mode": "[parameters('agentMode')]"
                 },
-                "agentIdentity": {
-                  "initialSponsorGroupId": "[parameters('initialSponsorGroupId')]"
-                },
                 "knowledgeGraphConfiguration": {
                   "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix')))]",
                   "managedResources": "[parameters('managedResourceGroupIds')]"
@@ -5751,7 +5712,7 @@
                   }
                 },
                 "defaultModel": {
-                  "name": "gpt-5",
+                  "name": "[parameters('defaultModelName')]",
                   "provider": "MicrosoftFoundry"
                 },
                 "upgradeChannel": "[parameters('upgradeChannel')]"

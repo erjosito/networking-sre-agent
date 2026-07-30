@@ -390,9 +390,6 @@ param sreAgentAccessLevel string = 'High'
 @allowed(['Review', 'Autonomous', 'ReadOnly'])
 param sreAgentMode string = 'Review'
 
-@description('Microsoft Entra group ID whose members can manage the SRE Agent (required when deploySreAgent=true)')
-param sreAgentSponsorGroupId string = ''
-
 @description('Default model for the SRE Agent. "Automatic" lets the service pick an available model in the region (recommended; avoids region-specific model availability failures).')
 param sreAgentModelName string = 'Automatic'
 
@@ -403,7 +400,6 @@ module sreAgent 'modules/sre-agent.bicep' = if (deploySreAgent) {
     prefix: prefix
     accessLevel: sreAgentAccessLevel
     agentMode: sreAgentMode
-    initialSponsorGroupId: sreAgentSponsorGroupId
     defaultModelName: sreAgentModelName
     managedResourceGroupIds: [
       resourceGroup().id

@@ -28,13 +28,12 @@
     Shared key for all site-to-site VPN connections (default: TestVpnKey2025!).
 
 .PARAMETER DeploySreAgent
-    Whether to deploy the Azure SRE Agent (default: $true). Requires an Entra
-    sponsor group (see -SreAgentSponsorGroupId).
+    Whether to deploy the Azure SRE Agent (default: $true).
 
 .PARAMETER SreAgentSponsorGroupId
-    Object ID of the Microsoft Entra group whose members can manage the SRE Agent.
-    Required when -DeploySreAgent is $true. If omitted, the script auto-discovers a
-    group named 'SRE'. See README > Azure SRE Agent Setup to create one.
+    Deprecated / ignored. Agent-identity creation is gated per-tenant, so the agent
+    is now deployed with a SystemAssigned + UserAssigned identity and no sponsor
+    group. Retained only for backward compatibility; any value passed is ignored.
 
 .EXAMPLE
     .\deploy.ps1
@@ -111,18 +110,12 @@ if ([string]::IsNullOrEmpty($PlainPassword)) {
     exit 1
 }
 
-# Resolve the SRE Agent sponsor group (a Microsoft Entra group whose members can
-# manage the agent). If not supplied, try to auto-discover a group named 'SRE'.
-if ($DeploySreAgent -and [string]::IsNullOrEmpty($SreAgentSponsorGroupId)) {
-    Write-Info "Resolving SRE Agent sponsor group (Entra group named 'SRE')..."
-    $SreAgentSponsorGroupId = az ad group show --group "SRE" --query id -o tsv 2>$null
-    if ([string]::IsNullOrEmpty($SreAgentSponsorGroupId)) {
-        Write-Err "deploySreAgent is true but no sponsor group was found."
-        Write-Err "Create one (see README > Azure SRE Agent Setup) and pass -SreAgentSponsorGroupId <id>,"
-        Write-Err "or deploy without the agent: -DeploySreAgent `$false"
-        exit 1
-    }
-    Write-Info "Sponsor group 'SRE': $SreAgentSponsorGroupId"
+# SRE Agent sponsor group: no longer required. Agent-identity creation is gated
+# per-tenant, so the module deploys the agent with a SystemAssigned + UserAssigned
+# identity and does NOT set an agentIdentity/sponsor group. -SreAgentSponsorGroupId
+# is retained for backward compatibility but is ignored by the template.
+if ($DeploySreAgent -and -not [string]::IsNullOrEmpty($SreAgentSponsorGroupId)) {
+    Write-Info "SRE Agent sponsor group supplied but ignored (no longer required): $SreAgentSponsorGroupId"
 }
 
 $Subscription = az account show --query name -o tsv
@@ -165,9 +158,6 @@ $ParamsObj = @{
         vpnSharedKey   = @{ value = $VpnSharedKey }
         deploySreAgent = @{ value = $DeploySreAgent }
     }
-}
-if ($DeploySreAgent) {
-    $ParamsObj.parameters.sreAgentSponsorGroupId = @{ value = $SreAgentSponsorGroupId }
 }
 $ParamsObj | ConvertTo-Json -Depth 10 | Out-File $ParamsFile -Encoding utf8
 

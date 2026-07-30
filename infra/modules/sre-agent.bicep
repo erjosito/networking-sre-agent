@@ -6,7 +6,7 @@
 //       via the SRE Agent portal after deployment — Bicep cannot upload them.
 //       Azure Monitor is the default incident platform and is auto-connected.
 
-@description('Azure region — must be eastus2, swedencentral, or australiaeast')
+@description('Azure region for the SRE Agent. Verified working in eastus2 and canadacentral. NOTE: do NOT set an agentIdentity/initialSponsorGroupId — creating agent identities is gated per-tenant and was the original deployment blocker; this module uses a SystemAssigned + UserAssigned identity instead.')
 param location string
 
 @description('Resource naming prefix')
@@ -19,9 +19,6 @@ param accessLevel string = 'High'
 @description('Agent mode: Review (propose+approve), Autonomous, or ReadOnly')
 @allowed(['Review', 'Autonomous', 'ReadOnly'])
 param agentMode string = 'Review'
-
-@description('Microsoft Entra group ID for initial sponsor group (required for agent identity). Members of this group can manage the agent.')
-param initialSponsorGroupId string
 
 @description('Resource group IDs the agent should monitor (full resource IDs)')
 param managedResourceGroupIds array = []
@@ -67,7 +64,7 @@ resource sreAgent 'Microsoft.App/agents@2025-05-01-preview' = {
   name: '${prefix}-sre-agent'
   location: location
   identity: {
-    type: 'UserAssigned'
+    type: 'SystemAssigned, UserAssigned'
     userAssignedIdentities: {
       '${agentIdentity.id}': {}
     }
@@ -81,9 +78,6 @@ resource sreAgent 'Microsoft.App/agents@2025-05-01-preview' = {
       accessLevel: accessLevel
       identity: agentIdentity.id
       mode: agentMode
-    }
-    agentIdentity: {
-      initialSponsorGroupId: initialSponsorGroupId
     }
     knowledgeGraphConfiguration: {
       identity: agentIdentity.id

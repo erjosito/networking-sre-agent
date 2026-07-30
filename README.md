@@ -96,7 +96,6 @@ All traffic between spokes, between spokes and on-prem, and to the Private Endpo
 | **Bicep CLI** | Bundled with Azure CLI ≥ 2.20 |
 | **PowerShell** | 7+ (primary scripting language for this project) |
 | **Storage Blob Data Contributor** | Required on deploying user for static website upload (`--auth-mode login`) |
-| **Entra sponsor group** | Required only when deploying the SRE Agent — an Entra group named `SRE` (auto-discovered) or passed via `-SreAgentSponsorGroupId`. See [Sponsor Group](#sponsor-group-required). |
 
 ---
 
@@ -264,28 +263,16 @@ The SRE Agent is deployed as part of the main Bicep deployment (`infra/modules/s
 - Assigns a user-assigned managed identity with Network Contributor and Reader roles
 - Configures monitoring scope to the infrastructure resource group
 
-### Sponsor Group (required)
+### Identity model (no sponsor group required)
 
-The SRE Agent requires a **Microsoft Entra sponsor group** — the group whose members
-are allowed to manage the agent. Its object ID is passed to the deployment as
-`sreAgentSponsorGroupId`.
+The SRE Agent is deployed with a **SystemAssigned + UserAssigned managed identity**
+and does **not** create an agent identity / sponsor group. Creating agent identities
+(`properties.agentIdentity.initialSponsorGroupId`) is gated per-tenant and was the
+original cause of the *"Tenant is not allowed to create agent identities"* failure —
+avoiding it altogether lets the agent provision on tenants without that allow-listing.
 
-`deploy.ps1` auto-discovers a group named **`SRE`**. If it doesn't exist, create it
-once (any member who should manage the agent goes in the group):
-
-```powershell
-# Create the sponsor group and add yourself
-$groupId = az ad group create --display-name "SRE" --mail-nickname "SRE" --query id -o tsv
-$me = az ad signed-in-user show --query id -o tsv
-az ad group member add --group $groupId --member-id $me
-Write-Host "Sponsor group ID: $groupId"
-```
-
-Then either let `deploy.ps1` find it automatically, or pass it explicitly:
-
-```powershell
-.\scripts\deploy.ps1 -SreAgentSponsorGroupId $groupId
-```
+The `-SreAgentSponsorGroupId` parameter is retained only for backward compatibility
+and is ignored. Verified working in **eastus2** and **canadacentral**.
 
 To deploy the lab **without** the SRE Agent (e.g. network-only testing), use:
 
