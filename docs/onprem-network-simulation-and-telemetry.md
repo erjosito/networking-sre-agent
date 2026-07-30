@@ -635,3 +635,12 @@ Concrete decisions made while building the IaC (`infra/modules/onprem-*.bicep`,
 - AMA syslog uses a DCR (`Microsoft-Syslog` stream, facility/level `*`) + a DCR association scoped to
   each VM; no DCE is needed because metrics use the Azure Monitor custom-metrics path (not the Logs
   Ingestion API).
+
+
+---
+
+*Companion docs:*
+[Telemetry pipelines — how it works](./onprem-telemetry-pipelines-how-it-works.md)
+· [Containerlab on-prem — how it works](./containerlab-onprem-how-it-works.md)
+· [SRE Agent configuration — how it works](./sre-agent-configuration.md)
+· [SRE Agent — consumes telemetry & closes the loop](./sre-agent-telemetry-and-actuation.md)

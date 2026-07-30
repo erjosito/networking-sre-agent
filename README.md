@@ -11,6 +11,10 @@ The repository includes:
 - **Health check script** (20 validation sections) for end-to-end environment verification
 - **SRE Agent configuration artifacts** (custom agents, skills, response plans)
 
+> **📚 Documentation:** In-depth guides live in [`docs/`](docs/README.md) — on-prem
+> device simulation, telemetry pipelines, the Containerlab fabric, and how the SRE
+> Agent is configured, consumes telemetry, and closes the incident loop.
+
 ---
 
 ## Architecture
@@ -259,9 +263,13 @@ The deployment includes Bicep templates and configuration artifacts for the SRE 
 
 The SRE Agent is deployed as part of the main Bicep deployment (`infra/modules/sre-agent.bicep`):
 
-- Creates the agent resource with autonomous mode and Azure Monitor connector
-- Assigns a user-assigned managed identity with Network Contributor and Reader roles
+- Creates the agent **resource** (the Bicep does *not* configure incident detection or knowledge — that is done post-deploy, see below)
+- Assigns a managed identity with the RBAC needed to detect, investigate, and fix (including **Monitoring Contributor on the subscription**, required for alert detection)
 - Configures monitoring scope to the infrastructure resource group
+
+> **How the agent actually works** (incident detection model, the two configuration
+> planes, and the one remaining portal-only step) is documented in
+> [`docs/sre-agent-configuration.md`](docs/sre-agent-configuration.md).
 
 ### Identity model (no sponsor group required)
 
@@ -282,14 +290,23 @@ To deploy the lab **without** the SRE Agent (e.g. network-only testing), use:
 
 ### Post-Deployment Configuration
 
-Upload knowledge and configure skills using the provided artifacts:
+`deploy.ps1` runs `configure-sre-agent.ps1 -Apply` automatically after the infra
+deployment. It connects Azure Monitor as the incident source, scopes the knowledge
+graph, and uploads + indexes the knowledge base. Run it manually to (re)apply or to
+print a **Working-agent readiness** report:
 
 ```powershell
-# Upload knowledge base files
-.\scripts\upload-knowledge.ps1
+# Report only (read-only): validate manifest + readiness report
+.\scripts\configure-sre-agent.ps1
 
-# Configuration artifacts are in sre-agent-config/
+# Apply: PATCH AzMonitor + scope, upload + index the knowledge base
+.\scripts\configure-sre-agent.ps1 -Apply
 ```
+
+The **only** remaining step to close the incident loop is a portal-only **incident
+response plan** (`sre.azure.com`). See
+[`docs/sre-agent-configuration.md`](docs/sre-agent-configuration.md) for the full
+detect → investigate → root-cause → fix requirements.
 
 ### Configuration Artifacts
 

@@ -538,3 +538,11 @@ flowchart LR
 Break the fabric (`neighbor 172.31.12.2 shutdown` on r1, as in §7) and the probe to `10.100.1.5:80`
 now black-holes at r1 — a **data-plane** failure that Connection Monitor catches, driven by a **real
 control-plane** event inside the fabric. Revert with `no neighbor 172.31.12.2 shutdown`.
+
+
+---
+
+*Companion docs:*
+[On-prem simulation & telemetry (design/decisions)](./onprem-network-simulation-and-telemetry.md)
+· [Telemetry pipelines — how it works](./onprem-telemetry-pipelines-how-it-works.md)
+· [SRE Agent — consumes telemetry & closes the loop](./sre-agent-telemetry-and-actuation.md)
