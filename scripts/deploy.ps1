@@ -242,6 +242,35 @@ if ($saName) {
     Write-Warn "No storage account found for static website. Private Endpoint HTTP probes may fail."
 }
 
+# ─── Post-deployment: Configure the SRE Agent ────────────────────────────────
+# Deploying the agent RESOURCE (sre-agent.bicep) does not configure its behaviour.
+# This step applies the configuration that lives outside the ARM resource body:
+#   * Control plane (ARM 2026-01-01): Azure Monitor incident integration
+#     (incidentManagementConfiguration.type=AzMonitor) + knowledge-graph
+#     managed-resource scope (this resource group).
+#   * Data plane (agentmemory API): upload + index the knowledge base.
+# Custom agents / skills / response plans / scheduled tasks have no stable
+# programmatic surface yet and are printed as a portal checklist by the script.
+# Non-fatal: a failure here does not fail the infrastructure deployment.
+if ($DeploySreAgent) {
+    Write-Host ""
+    Write-Info "Configuring the SRE Agent (Azure Monitor incident integration + knowledge base)..."
+    $configScript = Join-Path $PSScriptRoot "configure-sre-agent.ps1"
+    if (Test-Path $configScript) {
+        try {
+            & $configScript -AgentName "$Prefix-sre-agent" -ResourceGroup $ResourceGroup -Apply
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn "SRE Agent configuration reported issues (exit $LASTEXITCODE). Re-run: .\scripts\configure-sre-agent.ps1 -Apply"
+            }
+        } catch {
+            Write-Warn "SRE Agent configuration step failed: $($_.Exception.Message)"
+            Write-Warn "Re-run manually once the agent is ready: .\scripts\configure-sre-agent.ps1 -Apply"
+        }
+    } else {
+        Write-Warn "configure-sre-agent.ps1 not found; skipping agent configuration."
+    }
+}
+
 # ─── Print outputs ───────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -260,7 +289,8 @@ Write-Host "  Admin User     : $AdminUsername"
 Write-Host ""
 Write-Info "Next steps:"
 Write-Host "  1. Verify health:       .\scripts\check-health.ps1 -ResourceGroup $ResourceGroup"
-Write-Host "  2. Inject a fault:      .\scripts\inject-fault.ps1 -Fault vpn-disconnect -ResourceGroup $ResourceGroup"
-Write-Host "  3. Tear down when done: .\scripts\teardown.ps1 -ResourceGroup $ResourceGroup"
+Write-Host "  2. Configure SRE agent: .\scripts\configure-sre-agent.ps1 -Apply   (re-run if the post-deploy step was skipped)"
+Write-Host "  3. Inject a fault:      .\scripts\inject-fault.ps1 -Fault vpn-disconnect -ResourceGroup $ResourceGroup"
+Write-Host "  4. Tear down when done: .\scripts\teardown.ps1 -ResourceGroup $ResourceGroup"
 Write-Host ""
 Write-Info "Done! 🚀"
