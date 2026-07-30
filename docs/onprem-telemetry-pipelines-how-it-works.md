@@ -690,6 +690,81 @@ These build directly on what already exists; none are deployed yet:
 > Arista cEOS, Cisco) in the Containerlab fabric — the RADIUS/TACACS+ server and
 > the executor pattern stay exactly the same.
 
+### 8.4 Identity & credential model — managed identity / WIF vs. long-lived secrets
+
+A natural question: can the `sre-agent` service account use **Azure managed
+identity + Workload Identity Federation (WIF)** instead of long-lived secrets? The
+answer hinges on recognising **two distinct authentication boundaries** — managed
+identity/WIF cleanly solves one but **cannot natively cross the other**.
+
+```mermaid
+flowchart LR
+    AG["SRE Agent"] -->|"(1) Entra ID + Azure RBAC<br/>managed identity — NO secret"| EX["Executor<br/>(collector VM)"]
+    EX -->|"(2) RADIUS / TACACS+ / SSH<br/>legacy — cannot consume Entra tokens"| DEV["Router"]
+    EX -.->|"IMDS — NO secret"| KV[("Key Vault")]
+
+    classDef good fill:#e6ffe6,stroke:#2e8b57;
+    classDef warn fill:#fff3e0,stroke:#e67e22;
+    class AG,EX,KV good;
+    class DEV warn;
+```
+
+**Boundary 1 — Agent → Executor (Azure control plane): secretless.**
+`az vm run-command` is authenticated by Entra + Azure RBAC; the executor reads any
+secrets it needs from **Key Vault using its own managed identity via IMDS**. No
+stored secret on either leg.
+
+**Boundary 2 — Executor → device (device plane): cannot use Entra tokens.**
+RADIUS (RFC 2865) and TACACS+ predate OAuth/OIDC. There is **no standard way for a
+device to accept an Entra JWT as a credential** (no "EAP-OAuth", no token
+introspection). So you cannot federate a managed identity *directly* into a
+router login.
+
+**Where WIF actually fits:**
+- **Executor in Azure (our collector VM):** WIF adds nothing — the VM already has a
+  native managed identity via IMDS. Use it directly.
+- **Executor on *real* on-prem hardware (no Azure MI):** *this* is WIF's use case —
+  federate an on-prem OIDC IdP / k8s SA → Entra so the off-Azure box gets Entra
+  tokens **without a stored client secret**. But that token still only helps it
+  reach *Azure* (e.g. Key Vault) — it still can't be handed to the router as a
+  RADIUS credential.
+
+**What's irreducible vs. what can be ephemeral:**
+
+| Secret | Non-long-lived? |
+|--------|-----------------|
+| Agent → executor (Azure) | ✅ Managed identity, no secret |
+| Executor → Key Vault | ✅ Managed identity, no secret |
+| **`sre-agent` user credential** (presented at device login) | ✅ **JIT / short-lived** (below) |
+| **NAS ↔ RADIUS-server shared secret** | ⚠️ Long-lived by protocol — rotate, or replace with **RadSec (RADIUS/TLS)** certs |
+
+**The user credential does not have to be a static password.** Preferred pattern:
+1. Executor uses its **managed identity** to fetch a **just-in-time, short-lived
+   credential** from Key Vault (or mint an OTP), scoped to one remediation session.
+2. It presents that as the RADIUS "password" over the SSH keyboard-interactive →
+   PAM → RADIUS chain.
+3. FreeRADIUS validates it — via **`rlm_rest`** calling a Key Vault / REST backend
+   in its `authenticate` section, or as a pre-provisioned OTP.
+
+This shrinks the long-lived surface to **(a)** Key Vault access — itself governed
+by the secretless managed identity — and **(b)** the NAS↔server trust anchor.
+
+**The one thing you can't eliminate with legacy gear** is the **device↔AAA-server
+trust**. TACACS+ is *worse* here (its entire body is obfuscated with an MD5 scheme
+keyed on the shared secret). Two realistic options:
+- **Rotate** a Key Vault-sourced shared secret (simple; sufficient for the lab).
+- **RadSec (RADIUS over TLS, RFC 6614)** — replaces the shared secret with
+  **mutual-TLS certificates** that can be short-lived and PKI-managed/revocable.
+  Modern NOSes (Nokia SR Linux, Arista, newer Cisco) support it; FRR-via-PAM does
+  not.
+
+**Bottom line:** a *fully* secretless design is **not achievable with legacy
+devices**, because device firmware only speaks RADIUS/TACACS+/SSH and can't
+validate Entra tokens. The best achievable posture is: **managed identity for both
+Azure legs** (secretless) + a **JIT short-lived user credential** from Key Vault
+(not a static password) + the **NAS trust anchor hardened via rotation or RadSec
+certificates**. WIF is relevant *only* if the executor/RADIUS server runs off-Azure.
+
 ---
 
 *Companion docs:*
