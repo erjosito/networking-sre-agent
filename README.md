@@ -243,6 +243,30 @@ Simulate real-world networking failures to exercise the SRE Agent's investigatio
 .\scripts\inject-fault.ps1 -Scenario multi-fault
 ```
 
+### Clearing stale incidents
+
+The SRE Agent merges new firings of the *same* alert rule into an existing open
+incident, so a stale (acknowledged/resolved) incident can swallow a fresh firing
+instead of opening a clean investigation. Delete stale incidents between demo runs:
+
+```powershell
+# PowerShell
+.\scripts\clear-incidents.ps1 -ListOnly              # preview
+.\scripts\clear-incidents.ps1 -TitleContains clab    # delete clab incidents
+.\scripts\clear-incidents.ps1 -Force                 # delete all incidents (keeps onboarding thread)
+```
+
+```bash
+# Bash (requires az, curl, jq)
+./scripts/clear-incidents.sh --list-only
+./scripts/clear-incidents.sh --title-contains clab
+./scripts/clear-incidents.sh --yes
+```
+
+Both resolve the agent name/RG from `sre-agent-config/config.yaml`, delete via the
+data-plane `DELETE /api/v1/threads/{id}` endpoint, and preserve the onboarding
+thread unless `-All` / `--all` is given.
+
 ### Available Scenarios (33 total)
 
 #### IP Forwarding (2 scenarios)
@@ -554,6 +578,8 @@ networking-sre-agent/
 │   ├── inject-fault.ps1                 # Fault injection (33 scenarios)
 │   ├── check-health.ps1                 # Environment health validation (20 sections)
 │   ├── configure-sre-agent.ps1          # Apply agent config (knowledge, agents, plans)
+│   ├── clear-incidents.ps1              # Delete SRE Agent incidents (PowerShell)
+│   ├── clear-incidents.sh               # Delete SRE Agent incidents (bash: az+curl+jq)
 │   └── upload-knowledge.ps1             # Upload knowledge to SRE Agent
 ├── sre-agent-config/                    # SRE Agent configuration artifacts
 │   ├── config.yaml                      # Declarative config manifest
