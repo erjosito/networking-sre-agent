@@ -19,28 +19,43 @@ Everything runs inside one Azure VM, **`netsre-onprem-clab`** (10.100.1.5), as
 Docker containers:
 
 ```
-onprem-host ── 172.31.20.0/24 (LAN) ── onprem-r2 ══ eBGP + OSPF ══ onprem-r1 ── 172.31.11.0/30 ── (Azure probe)
- 172.31.20.10                          AS65102       172.31.12.0/30   AS65101
- (HTTP :80)                            lo 10.99.2.2   transit /30      lo 10.99.1.1
+onprem-host ── 172.31.20.0/24 (LAN) ── onprem-r2 ══ eBGP over loopbacks ══ onprem-r1 ── 172.31.11.0/30 ── (Azure probe)
+ 172.31.20.10                          AS65102       (OSPF area 0 underlay)   AS65101
+ (HTTP :80)                            lo 10.99.2.2   172.31.12.0/30 transit   lo 10.99.1.1
 ```
 
 - Containers: `clab-onprem-onprem-r1`, `clab-onprem-onprem-r2`, `clab-onprem-onprem-host`.
-- **OSPF** (area 0, over the transit) carries **ONLY the loopbacks** `10.99.1.1/32`,
-  `10.99.2.2/32`. It is the IGP for router-to-router / management reachability.
-- **BGP** carries the **data path**: r2 originates the LAN `172.31.20.0/24`; r1
-  originates the return `172.31.11.0/30`.
+- **OSPF** (area 0, over the transit) is the **IGP underlay**. It carries **only
+  the loopbacks** `10.99.1.1/32`, `10.99.2.2/32`.
+- **BGP** peers **loopback-to-loopback** (`update-source lo`, `ebgp-multihop 2`)
+  and carries the **data path**: r2 originates the LAN `172.31.20.0/24`; r1
+  originates the return `172.31.11.0/30`. On r1 the LAN route is **recursive over
+  the OSPF-learned peer loopback `10.99.2.2`**.
+- **CASCADE:** BGP rides the OSPF-learned loopbacks, so an **OSPF adjacency fault
+  withdraws the peer loopback → the BGP session drops → the LAN is withdrawn → the
+  clab Connection Monitor fails.** OSPF is the root cause but the first data-plane
+  symptom is a CM failure + a `bgpd` "neighbor Down" syslog. **Trace a BGP-down
+  symptom back to OSPF** rather than stopping at BGP.
 
-### Blast radius — decide which plane is implicated FIRST
+### Blast radius — decide which plane is the ROOT CAUSE (both fail the CM now)
 
-| Fault plane | What breaks | What stays GREEN | Which alert fires |
-|-------------|-------------|------------------|-------------------|
-| **OSPF only** (area/MTU/network-type) | loopback / mgmt reachability | LAN data path, **clab Connection Monitor** | `netsre-onprem-syslog-critical` (maybe) — **CM does NOT fire** |
-| **BGP / transit link** | LAN `172.31.20.0/24` in both directions | — | `netsre-clab-cm-checks-failed` (Sev2), `netsre-clab-cm-test-result-fail` (Sev1) |
+Because BGP peers over the OSPF-learned loopbacks, **every** control-plane fault
+here — OSPF *or* BGP *or* the transit link — ultimately withdraws the LAN and
+fires the clab Connection Monitor. The job is to find the **root layer**, not just
+to note "the LAN is down".
 
-> A `clab-*` **CM** alert ⇒ a **BGP or transit-link** fault (the LAN was withdrawn).
-> A `syslog-critical` alert with the **CM still green** ⇒ likely an **OSPF-only**
-> fault. Let the alert's own dimensions (`HostName`, `ProcessName`) steer you:
-> `ProcessName == "ospfd"` vs `"bgpd"` vs `"zebra"`/kernel names the subsystem.
+| Root cause | Cascade | Discriminator (OSPF adjacency state) | Which alert fires |
+|------------|---------|--------------------------------------|-------------------|
+| **OSPF** (area/MTU/network-type) | adj down → peer loopback withdrawn → BGP session drops → LAN withdrawn | `show ip ospf neighbor` **empty/stuck**; `O 10.99.2.2/32` **gone** | `netsre-clab-cm-*` **and** `ospfd`/`bgpd` syslog |
+| **BGP** (session shut / policy) | session/route down → LAN withdrawn | OSPF neighbor **Full**, `O 10.99.2.2/32` **present** | `netsre-clab-cm-*` + `bgpd` syslog |
+| **Transit link** down | OSPF **and** BGP both drop | adjacency gone **and** `eth1` down | `netsre-clab-cm-*` |
+
+> **Key discriminator:** a clab **CM** failure with a `bgpd` "neighbor Down"
+> syslog is **ambiguous** — check the **OSPF adjacency first**. If OSPF is
+> **empty** and `O 10.99.2.2/32` is **gone**, the BGP drop is a *symptom* and the
+> **root cause is OSPF**. If OSPF is **Full** and the peer loopback is present, the
+> root cause is genuinely **BGP** (session shut or a route policy). Let the alert's
+> `ProcessName` dimension (`ospfd` vs `bgpd` vs `zebra`) corroborate.
 
 ---
 
@@ -91,22 +106,28 @@ transit. Run read-only commands on the clab VM (see "Running commands" below):
 
 ```bash
 R1=clab-onprem-onprem-r1; R2=clab-onprem-onprem-r2
-# OSPF
+# OSPF FIRST — it underpins BGP, so rule it in/out before blaming BGP
 docker exec $R1 vtysh -c 'show ip ospf neighbor'          # healthy = Full
 docker exec $R1 vtysh -c 'show ip ospf interface eth1'    # area / net-type / MTU
 docker exec $R2 vtysh -c 'show ip ospf interface eth1'    # compare against R1
-# BGP
-docker exec $R1 vtysh -c 'show ip bgp summary'            # healthy = Established, PfxRcd 2
-docker exec $R1 vtysh -c 'show ip route 172.31.20.0/24'   # LAN present via 172.31.12.2?
-docker exec $R2 vtysh -c 'show ip bgp neighbor 172.31.12.1 advertised-routes'  # is r2 advertising the LAN?
+docker exec $R1 vtysh -c 'show ip route 10.99.2.2'        # peer loopback via OSPF? (gone ⇒ OSPF root cause)
+# BGP (peers over the loopback 10.99.2.2)
+docker exec $R1 vtysh -c 'show ip bgp summary'            # healthy = Established, PfxRcd 1
+docker exec $R1 vtysh -c 'show ip route 172.31.20.0/24'   # LAN present (recursive via 10.99.2.2)?
+docker exec $R2 vtysh -c 'show ip bgp neighbor 10.99.1.1 advertised-routes'  # is r2 advertising the LAN?
 # link + data path
 docker exec $R1 vtysh -c 'show interface eth1'
 docker exec $R1 ping -c2 172.31.20.10
 ```
 
-Key discriminator: **BGP `Established` but the LAN is absent** ⇒ the route is being
-withdrawn or **filtered** (missing `network` statement or an outbound route-map) —
-check `advertised-routes` on **r2**, not just session state on r1.
+Key discriminators:
+- **OSPF neighbor empty + `10.99.2.2/32` gone** ⇒ **OSPF is the root cause**; any
+  BGP-down you also see is a *downstream symptom* of the withdrawn loopback.
+- **OSPF Full + peer loopback present, but BGP not Established** ⇒ genuine **BGP
+  session** fault (e.g. neighbor shut).
+- **BGP `Established` but the LAN is absent** ⇒ the route is being withdrawn or
+  **filtered** (missing `network` statement or an outbound route-map) — check
+  `advertised-routes` on **r2**, not just session state on r1.
 
 ### Step 4 — Check recent changes on the device AND its neighbors
 
@@ -155,19 +176,20 @@ Each is injectable via `scripts/inject-fault.ps1 -Scenario <name> [-Revert]`.
 
 | Scenario | Device / subsystem | First signal | Targeted confirmation | Root cause → fix |
 |----------|--------------------|--------------|-----------------------|------------------|
-| `clab-ospf-area-mismatch` | r1 / ospfd | syslog `ospfd` adjacency down; **CM stays green** | `show ip ospf neighbor` empty; `show ip ospf interface eth1` Area differs r1↔r2 | transit in wrong area → set both to `area 0` |
-| `clab-ospf-mtu-mismatch` | r1 / ospfd | syslog `ospfd`; **CM green** | neighbor stuck `ExStart/Exchange`; `show interface eth1` MTU differs | interface MTU mismatch → match MTU (1500) |
-| `clab-ospf-network-type-mismatch` | r1 / ospfd | syslog `ospfd`; **CM green** | neighbor never `Full`; `show ip ospf interface eth1` Network Type differs | net-type differs → set both `point-to-point` |
-| `clab-bgp-session-down` | r1 / bgpd | **clab CM fails**; syslog `bgpd` Established→Idle | `show ip bgp summary` peer Idle(Admin); LAN "% Network not in table" | neighbor administratively shut → `no neighbor 172.31.12.2 shutdown` |
-| `clab-lan-route-withdraw` | r2 / bgpd | **clab CM fails**; session stays up | `show ip bgp summary` **Established** but no LAN on r1 | r2 missing `network 172.31.20.0/24` → re-add it |
+| `clab-ospf-area-mismatch` | r1 / ospfd (→ cascades to bgpd) | **clab CM fails** + `ospfd`/`bgpd` syslog | `show ip ospf neighbor` empty; `O 10.99.2.2/32` gone; **then** BGP peer 10.99.2.2 Connect/Active | transit in wrong area → set both to `area 0` |
+| `clab-ospf-mtu-mismatch` | r1 / ospfd (→ cascade) | **clab CM fails** + syslog | neighbor stuck `ExStart/Exchange`; `show interface eth1` MTU differs; loopback withdrawn → BGP down | interface MTU mismatch → match MTU (1500) |
+| `clab-ospf-network-type-mismatch` | r1 / ospfd (→ cascade) | **clab CM fails** + syslog | neighbor never `Full`; `show ip ospf interface eth1` Network Type differs; loopback withdrawn → BGP down | net-type differs → set both `point-to-point` |
+| `clab-bgp-session-down` | r1 / bgpd | **clab CM fails**; syslog `bgpd` Established→Idle | OSPF **Full** + `O 10.99.2.2/32` present; `show ip bgp summary` peer Idle(Admin); LAN "% Network not in table" | neighbor administratively shut → `no neighbor 10.99.2.2 shutdown` |
+| `clab-lan-route-withdraw` | r2 / bgpd | **clab CM fails**; session stays up | OSPF Full; `show ip bgp summary` **Established** but no LAN on r1 | r2 missing `network 172.31.20.0/24` → re-add it |
 | `clab-bgp-prefix-filter` | r2 / bgpd | **clab CM fails**; session stays up | r2 `advertised-routes` to r1 **empty** for the LAN; outbound route-map present | outbound route-map denies LAN → remove `route-map RM-DENY-LAN` / neighbor `... out` |
 | `clab-transit-link-down` | r1 / zebra+kernel | **clab CM fails**; OSPF **and** BGP both drop | `show interface eth1` down; both neighbor/session down | transit link down → `ip link set eth1 up` |
 
-The three **OSPF** faults are "silent" to the data path (the clab CM stays green) —
-detect them from **syslog + control-plane state**, never from reachability alone.
-The three **BGP** faults + the link fault fail the CM; distinguish them by whether
-the **session is Established** (route-missing / prefix-filter) or **down**
-(session-down / link-down), and by checking r2's `advertised-routes`.
+**All** of these fail the clab CM (the LAN is withdrawn either directly or via the
+OSPF→BGP cascade). Distinguish the **root layer** by OSPF adjacency state **first**:
+OSPF **empty + `10.99.2.2/32` gone** ⇒ an **OSPF** root cause (the BGP-down you also
+see is a symptom); OSPF **Full** ⇒ a genuine **BGP** fault — then split it by
+whether the session is **Established** (route-missing / prefix-filter, check r2's
+`advertised-routes`) or **down** (session-down / link-down).
 
 ---
 

@@ -161,7 +161,7 @@ graph TB
         BR -. "mgmt veth" .- R1E0
         BR -. "mgmt veth" .- R2E0
         BR -. "mgmt veth" .- HE0
-        R1E1 ===|"data veth<br/>transit /30"| R2E1
+        R1E1 ===|"data veth<br/>transit /30<br/>OSPF area 0 + eBGP/lo"| R2E1
         R2E2 ===|"data veth<br/>LAN /24"| HE1
     end
     classDef br fill:#fef9c3,stroke:#a16207,color:#0f172a;
@@ -289,59 +289,76 @@ interface lo
 interface eth1
  description transit-to-onprem-r2
  ip address 172.31.12.1/30
+ ip ospf network point-to-point
+ ip ospf hello-interval 2
+ ip ospf dead-interval 8
 !
 router bgp 65101
  bgp router-id 10.99.1.1
  no bgp ebgp-requires-policy
- neighbor 172.31.12.2 remote-as 65102
- neighbor 172.31.12.2 description onprem-r2-core
+ neighbor 10.99.2.2 remote-as 65102
+ neighbor 10.99.2.2 description onprem-r2-core
+ neighbor 10.99.2.2 update-source lo
+ neighbor 10.99.2.2 ebgp-multihop 2
+ neighbor 10.99.2.2 timers 3 9
  !
  address-family ipv4 unicast
-  network 10.99.1.1/32
+  network 172.31.11.0/30
  exit-address-family
+!
+router ospf
+ ospf router-id 10.99.1.1
+ network 172.31.12.0/30 area 0
+ network 10.99.1.1/32 area 0
 !
 ```
 
 `onprem-r2` mirrors this with AS `65102`, loopback `10.99.2.2/32`, and additionally owns
 `eth2 = 172.31.20.1/24` and advertises `network 172.31.20.0/24` — the on-prem LAN — into
-BGP.
+BGP. **OSPF area 0** runs over the transit on both routers and advertises the loopbacks.
 
 FRR chooses which daemons to run from `/etc/frr/daemons`; the relevant lines are
-`zebra=yes` and `bgpd=yes`. **These files must have Unix (LF) line endings** — see §8.
+`zebra=yes`, `bgpd=yes`, and `ospfd=yes`. **These files must have Unix (LF) line
+endings** — see §8.
 
 ---
 
-## 6. The control plane — eBGP up and routes exchanged
+## 6. The control plane — OSPF underlay + eBGP over loopbacks
 
-Once bgpd is running, the eBGP session between the two ASNs establishes and each router
-advertises its prefixes:
+**OSPF is the IGP underlay.** It forms an adjacency over the directly-connected transit
+`172.31.12.0/30` and advertises the router loopbacks (`10.99.1.1/32`, `10.99.2.2/32`).
+**BGP then peers loopback-to-loopback** (`update-source lo`, `ebgp-multihop 2`), so the
+BGP session can only come up *after* OSPF has installed the peer loopback route — BGP
+rides the OSPF underlay:
 
 ```console
+$ docker exec clab-onprem-onprem-r1 vtysh -c "show ip ospf neighbor"
+Neighbor ID     Pri State      Up Time   Dead Time Address       Interface
+10.99.2.2         1 Full/-     1m52s     7.920s    172.31.12.2   eth1:172.31.12.1
+
 $ docker exec clab-onprem-onprem-r1 vtysh -c "show ip bgp summary"
-IPv4 Unicast Summary (VRF default):
-BGP router identifier 10.99.1.1, local AS number 65101 vrf-id 0
-
 Neighbor        V         AS   MsgRcvd   MsgSent   ... Up/Down State/PfxRcd   PfxSnt Desc
-172.31.12.2     4      65102         6         7   ... 00:01:26            2        3 onprem-r2-core
-
-Total number of neighbors 1
+10.99.2.2       4      65102       163       163   ... 00:01:24            1        2 onprem-r2-core
 ```
 
-`State/PfxRcd = 2` (a number, not `Idle`/`Active`) means the session is **Established** and
-r1 has received 2 prefixes from r2. The resulting RIB on r1:
+OSPF neighbor `Full` and BGP `State/PfxRcd = 1` (a number, not `Idle`/`Active`) means the
+underlay is up and the loopback-peered session is **Established**, with r1 receiving the
+LAN prefix from r2. The resulting RIB on r1:
 
 ```console
 $ docker exec clab-onprem-onprem-r1 vtysh -c "show ip route"
 K>* 0.0.0.0/0 [0/0] via 172.20.20.1, eth0            <- default via mgmt bridge
 C>* 10.99.1.1/32 is directly connected, lo
-B>* 10.99.2.2/32 [20/0] via 172.31.12.2, eth1        <- r2 loopback, learned via BGP
+O>* 10.99.2.2/32 [110/10] via 172.31.12.2, eth1      <- r2 loopback, learned via OSPF (underlay)
 C>* 172.20.20.0/24 is directly connected, eth0
 C>* 172.31.12.0/30 is directly connected, eth1
-B>* 172.31.20.0/24 [20/0] via 172.31.12.2, eth1      <- the on-prem LAN, learned via BGP
+B>* 172.31.20.0/24 [20/0] via 172.31.12.2, eth1      <- the on-prem LAN, learned via BGP (recursive over 10.99.2.2)
 ```
 
-The `B>*` on `172.31.20.0/24` is the crux of the design: **r1 only knows how to reach the
-on-prem LAN because BGP told it so.** End-to-end reachability across the fabric works:
+The `O>*` on `10.99.2.2/32` (OSPF) plus the `B>*` on `172.31.20.0/24` (BGP, **recursive
+over the OSPF-learned loopback**) is the crux of the design: **r1 reaches the on-prem LAN
+via BGP, but that BGP session itself depends on the OSPF underlay.** Break OSPF and the
+whole chain collapses (see §7). End-to-end reachability across the fabric works:
 
 ```console
 $ docker exec clab-onprem-onprem-r1 ping -c 3 172.31.20.10
@@ -357,32 +374,56 @@ hop — `onprem-r2` — to reach the host.
 
 ---
 
-## 7. Fault demo — a control-plane failure withdraws the data path
+## 7. Fault demo — an OSPF underlay fault cascades to the data path
 
-Because r1 depends on BGP for the LAN route, shutting the BGP session cleanly reproduces a
-real "WAN edge lost its route to the LAN" incident. The causal chain:
+The headline fault for this fabric is an **OSPF adjacency break**. Because BGP peers over
+the OSPF-learned loopbacks, an IGP fault cascades all the way to the data path — the
+classic "IGP underlay + BGP over loopbacks" failure mode. The causal chain:
 
 ```mermaid
 flowchart LR
-    A["Inject:<br/>neighbor 172.31.12.2<br/>shutdown on r1"] --> B["eBGP session<br/>Established → Idle"]
-    B --> C["r2's advertisement<br/>of 172.31.20.0/24<br/>withdrawn"]
-    C --> D["route removed<br/>from r1 RIB"]
-    D --> E["r1 → host<br/>100% packet loss"]
-    E --> F["data-plane probe<br/>fails ⇒ incident"]
+    A["Inject:<br/>OSPF area mismatch<br/>on r1 eth1"] --> B["OSPF adjacency<br/>Full → down (~8s)"]
+    B --> C["peer loopback<br/>10.99.2.2/32<br/>withdrawn"]
+    C --> D["BGP session<br/>(peers over 10.99.2.2)<br/>drops (~9s)"]
+    D --> E["LAN 172.31.20.0/24<br/>withdrawn from r1"]
+    E --> F["host probe<br/>100% loss ⇒<br/>clab CM fails ⇒ incident"]
     classDef inject fill:#fee2e2,stroke:#b91c1c,color:#0f172a;
     classDef effect fill:#fef3c7,stroke:#a16207,color:#0f172a;
     classDef outcome fill:#e0e7ff,stroke:#3730a3,color:#0f172a;
     class A inject;
-    class B,C,D effect;
-    class E,F outcome;
+    class B,C,D,E effect;
+    class F outcome;
 ```
 
-Captured live:
+Inject/revert with `scripts/inject-fault.ps1 -Scenario clab-ospf-area-mismatch [-Revert]`.
+Captured live (root cause is OSPF, first data-plane symptom is the CM failing):
 
 ```console
-# Inject: administratively shut down the eBGP neighbor on r1
-$ docker exec clab-onprem-onprem-r1 vtysh -c "conf t" \
-      -c "router bgp 65101" -c "neighbor 172.31.12.2 shutdown"
+# OSPF adjacency gone; peer loopback withdrawn:
+$ docker exec clab-onprem-onprem-r1 vtysh -c "show ip ospf neighbor"      # (empty)
+$ docker exec clab-onprem-onprem-r1 vtysh -c "show ip route 10.99.2.2"    # gone
+
+# Cascade: BGP (peered over 10.99.2.2) drops, LAN withdrawn, data path broken:
+$ docker exec clab-onprem-onprem-r1 vtysh -c "show ip bgp summary" | grep 10.99.2.2
+10.99.2.2       4      65102 ...      Connect         0        onprem-r2-core
+$ docker exec clab-onprem-onprem-r1 vtysh -c "show ip route 172.31.20.0/24"
+% Network not in table
+$ docker exec clab-onprem-onprem-r1 ping -c 2 -W 1 172.31.20.10
+2 packets transmitted, 0 packets received, 100% packet loss
+```
+
+A **pure BGP** fault produces the same data-plane symptom without touching OSPF — useful
+for teaching the agent to find the *root layer*. Inject with
+`scripts/inject-fault.ps1 -Scenario clab-bgp-session-down`; the mechanics
+(`neighbor 10.99.2.2 shutdown` on r1) withdraw the LAN while OSPF stays `Full`:
+
+```console
+# Inject: administratively shut down the eBGP neighbor on r1 (heredoc into vtysh)
+$ docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
+configure terminal
+router bgp 65101
+ neighbor 10.99.2.2 shutdown
+EOF
 
 # The LAN route is immediately withdrawn from r1's table:
 $ docker exec clab-onprem-onprem-r1 vtysh -c "show ip route 172.31.20.0/24"
@@ -393,14 +434,17 @@ $ docker exec clab-onprem-onprem-r1 ping -c 2 -W 1 172.31.20.10
 2 packets transmitted, 0 packets received, 100% packet loss
 
 # Revert: bring the neighbor back
-$ docker exec clab-onprem-onprem-r1 vtysh -c "conf t" \
-      -c "router bgp 65101" -c "no neighbor 172.31.12.2 shutdown"
+$ docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
+configure terminal
+router bgp 65101
+ no neighbor 10.99.2.2 shutdown
+EOF
 
 $ docker exec clab-onprem-onprem-r1 vtysh -c "show ip route 172.31.20.0/24"
 Routing entry for 172.31.20.0/24
   Known via "bgp", distance 20, metric 0, best
   Last update 00:00:03 ago
-  * 172.31.12.2, via eth1, weight 1
+    10.99.2.2 (recursive), weight 1
 ```
 
 This is the kind of control-plane event the design doc discusses attaching data-plane
@@ -562,9 +606,10 @@ flowchart LR
     class R1,R2,H clab;
 ```
 
-Break the fabric (`neighbor 172.31.12.2 shutdown` on r1, as in §7) and the probe to `10.100.1.5:80`
+Break the fabric (`neighbor 10.99.2.2 shutdown` on r1, or the OSPF area-mismatch cascade as
+in §7) and the probe to `10.100.1.5:80`
 now black-holes at r1 — a **data-plane** failure that Connection Monitor catches, driven by a **real
-control-plane** event inside the fabric. Revert with `no neighbor 172.31.12.2 shutdown`.
+control-plane** event inside the fabric. Revert with `no neighbor 10.99.2.2 shutdown`.
 
 
 ---

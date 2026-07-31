@@ -63,23 +63,28 @@ system_prompt: |
   `clabhost-to-infabric-server` Connection Monitor) target a **Containerlab FRR
   network** inside one VM, `netsre-onprem-clab` (10.100.1.5). Reason about it at the
   **control-plane** level and use the **on-prem-fabric-triage** skill:
-  - Topology: `onprem-r1` (AS65101, lo 10.99.1.1) ═ eBGP+OSPF over transit
-    172.31.12.0/30 ═ `onprem-r2` (AS65102, lo 10.99.2.2) → LAN 172.31.20.0/24 →
+  - Topology: `onprem-r1` (AS65101, lo 10.99.1.1) ═ transit 172.31.12.0/30 ═
+    `onprem-r2` (AS65102, lo 10.99.2.2) → LAN 172.31.20.0/24 →
     `onprem-host` (172.31.20.10, HTTP :80). Containers: `clab-onprem-onprem-r1/r2/host`.
-  - **OSPF** (area 0) carries ONLY the loopbacks; **BGP** carries the LAN data path.
-    So OSPF-only faults (area/MTU/network-type) break loopback/mgmt reachability but
-    leave the LAN and the clab Connection Monitor GREEN; a **clab CM** alert means a
-    **BGP or transit-link** fault that withdrew the LAN.
+  - **OSPF** (area 0) is the IGP **underlay** carrying ONLY the loopbacks; **BGP**
+    peers **loopback-to-loopback** (`update-source lo`, `ebgp-multihop 2`) and
+    carries the LAN data path. So BGP RIDES the OSPF-learned loopbacks: an OSPF
+    adjacency fault (area/MTU/network-type) withdraws the peer loopback → the BGP
+    session drops → the LAN 172.31.20.0/24 is withdrawn → the clab Connection
+    Monitor FAILS. A **clab CM** alert can therefore be rooted in OSPF, BGP, OR the
+    transit link — find the ROOT LAYER by checking OSPF adjacency FIRST (empty +
+    `O 10.99.2.2/32` gone ⇒ OSPF root cause; the BGP-down is a downstream symptom).
   - **Do NOT assume a device is healthy because telemetry (SNMP/Heartbeat/syslog) is
     flowing** — a control-plane fault is invisible to liveness signals.
   - Procedure: (1) pull the EXACT triggering signal FIRST — the Syslog rows
     (`Facility=='daemon'`, project HostName/ProcessName/SeverityLevel/SyslogMessage)
     or the CM test result — and quote it; (2) identify device + subsystem
     (ospfd/bgpd/zebra) + fault class from the message and alert dimensions;
-    (3) inspect OSPF/BGP state on the implicated device AND its neighbor
-    (`show ip ospf neighbor`, `show ip ospf interface eth1` on r1 and r2;
-    `show ip bgp summary`, `show ip route 172.31.20.0/24` on r1; and
-    `show ip bgp neighbor 172.31.12.1 advertised-routes` on r2 — BGP Established but
+    (3) inspect OSPF/BGP state on the implicated device AND its neighbor — OSPF
+    FIRST since it underpins BGP (`show ip ospf neighbor`, `show ip ospf interface
+    eth1` on r1 and r2, `show ip route 10.99.2.2`); then BGP
+    (`show ip bgp summary`, `show ip route 172.31.20.0/24` on r1; and
+    `show ip bgp neighbor 10.99.1.1 advertised-routes` on r2 — BGP Established but
     LAN absent ⇒ a route-map/`network`-statement filter); (4) check recent changes
     (running-config vs `infra/containerlab/configs/{r1,r2}/frr.conf`, `OnPremAAA_CL`
     logins, syslog flap history) on the device AND its neighbor; (5) remediate and

@@ -3,19 +3,24 @@
 **Scope:** the on-prem Containerlab fabric inside `netsre-onprem-clab`
 (10.100.1.5). See `knowledge/onprem-network-topology.md`.
 
-**What OSPF does here:** OSPF is the on-prem **IGP**. It runs in **area 0** over
-the `onprem-r1 ↔ onprem-r2` transit link `172.31.12.0/30` (configured as
-`point-to-point`) and carries the router **loopbacks** (`10.99.1.1/32`,
-`10.99.2.2/32`). The loopbacks are advertised **only via OSPF** — *not* BGP — so
-an OSPF fault is isolated from the BGP-carried data path.
+**What OSPF does here:** OSPF is the on-prem **IGP underlay**. It runs in
+**area 0** over the `onprem-r1 ↔ onprem-r2` transit link `172.31.12.0/30`
+(configured as `point-to-point`) and carries the router **loopbacks**
+(`10.99.1.1/32`, `10.99.2.2/32`), advertised **only via OSPF** — not BGP. **BGP
+peers over those loopbacks** (`update-source lo`, `ebgp-multihop 2`), so BGP is
+reliant on the OSPF underlay to reach its neighbor.
 
-> **Design note (blast radius):** BGP still carries the on-prem LAN
-> `172.31.20.0/24`, so an OSPF-only fault breaks **internal / management
-> reachability** (router-to-router loopbacks) **without** taking down the LAN data
-> path or the `netsre-clab-connection-monitor` probe. This models a very common
-> real-world situation: an IGP misconfig that a data-plane health check does *not*
-> catch — exactly the kind of "silent" fault the SRE Agent should reason about by
-> combining control-plane state with syslog, not reachability alone.
+> **Design note (blast radius — CASCADE):** because the eBGP session is
+> loopback-to-loopback and the loopbacks are only reachable via OSPF, an OSPF
+> adjacency fault **cascades**: the peer loopback is withdrawn → the BGP session
+> (which peers over it) drops → the on-prem LAN `172.31.20.0/24` is withdrawn in
+> both directions → the `netsre-clab-connection-monitor` probe **fails** and
+> `netsre-clab-cm-*` fires. The **root cause is OSPF**, but the **first data-plane
+> symptom is a Connection-Monitor failure** (and a `bgpd` "neighbor Down" syslog).
+> This models a real WAN "IGP underlay + BGP over loopbacks" fabric: an IGP fault
+> that a naïve triage would misattribute to BGP. The SRE Agent must trace the
+> cascade back to OSPF — do **not** stop at "the BGP session is down"; check the
+> OSPF adjacency and the missing peer-loopback route.
 
 ---
 
@@ -78,7 +83,11 @@ docker exec $R2 vtysh -c 'show ip ospf interface eth1'
 docker exec $R1 vtysh -c 'show ip route ospf'          # expect O 10.99.2.2/32
 docker exec $R2 vtysh -c 'show ip route ospf'          # expect O 10.99.1.1/32
 
-# 4. Reachability that DEPENDS on OSPF (loopback-to-loopback)
+# 4. The CASCADE — BGP peers over the loopback, LAN rides BGP
+docker exec $R1 vtysh -c 'show ip bgp summary'         # peer 10.99.2.2 Established?
+docker exec $R1 vtysh -c 'show ip route 172.31.20.0/24'  # LAN present (recursive via 10.99.2.2)?
+
+# 5. Reachability that DEPENDS on OSPF (loopback-to-loopback)
 docker exec $R1 ping -c2 -I 10.99.1.1 10.99.2.2
 ```
 
@@ -87,8 +96,12 @@ Interpretation:
   `show ip ospf interface eth1` on both sides — mismatched **Area**, **Network
   Type**, **MTU**, or **timers** is the usual cause.
 - Neighbor **Full** but peer loopback missing ⇒ missing `network` / redistribution.
-- Loopback ping fails while `172.31.20.0/24` (BGP) still works ⇒ confirms an
-  **OSPF-only** (IGP) fault; the CM will (correctly) stay green.
+- Peer loopback `O 10.99.2.2/32` **gone** ⇒ the **cascade** is in play: the BGP
+  session (peered over that loopback) will drop within `timers 3 9` and
+  `172.31.20.0/24` disappears from r1 (`% Network not in table`) ⇒ the CM fails.
+  When you see a `bgpd` "neighbor Down" symptom, **do not stop there** — confirm
+  the OSPF adjacency and the missing `O 10.99.2.2/32` route to reach the true root
+  cause (OSPF), not the downstream BGP symptom.
 
 ### Correlate in Azure Monitor
 
@@ -121,9 +134,13 @@ end
 EOF
 ```
 
-Expected (~within dead interval, ≤40s): `show ip ospf neighbor` on r1 becomes
+Expected (~within dead interval, ≤8s): `show ip ospf neighbor` on r1 becomes
 **empty**; `O 10.99.2.2/32` disappears from r1's route table; loopback ping fails.
-The BGP session and `172.31.20.0/24` are **unaffected**.
+Then the **cascade** (~within BGP `timers 3 9`): the r1↔r2 BGP session (peered over
+`10.99.2.2`) drops to `Connect/Active`, `172.31.20.0/24` becomes
+**"% Network not in table"** on r1, the host probe to `172.31.20.10` goes to 100%
+loss, and `netsre-clab-connection-monitor` fails → `netsre-clab-cm-*` fires. Total
+convergence ~15s.
 
 ## Remediate / revert
 
@@ -140,10 +157,13 @@ EOF
 ```
 
 Confirm: `show ip ospf neighbor` returns to **Full**; `O 10.99.2.2/32` reappears;
-loopback ping succeeds.
+loopback ping succeeds; the BGP session re-establishes over the loopback;
+`172.31.20.0/24` returns to r1; the CM recovers.
 
 > **Verified live** on `netsre-onprem-clab`: adjacency Full → area mismatch →
-> neighbor table empty → revert → Full, with BGP/CM untouched throughout.
+> neighbor table empty → **BGP peer 10.99.2.2 drops to Connect** → LAN
+> `172.31.20.0/24` "% Network not in table" → host probe 100% loss; revert →
+> Full → BGP re-established → LAN restored → probe passes.
 
 ---
 

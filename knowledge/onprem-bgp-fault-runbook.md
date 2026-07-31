@@ -18,8 +18,18 @@ accepts it. `onprem-r1` in turn advertises the host-facing `172.31.11.0/30` so t
 `onprem-r1 ↔ onprem-r2` eBGP session or the transit link `172.31.12.0/30`
 withdraws the route in *both* directions and fails the CM probe.
 
-Common root causes: BGP session down (neighbor unreachable / shutdown), transit
-link down, `network` statement removed, route-map/prefix-list filtering, or an
+> **BGP peers over loopbacks (OSPF underlay).** The eBGP session is
+> loopback-to-loopback (`neighbor 10.99.2.2` / `10.99.1.1`, `update-source lo`,
+> `ebgp-multihop 2`), and those loopbacks are reachable **only via OSPF**. So a
+> BGP session that is "down" may actually be a **symptom of an OSPF fault** that
+> withdrew the peer loopback. **Always check the OSPF adjacency first** (`show ip
+> ospf neighbor`, `show ip route 10.99.2.2`); if OSPF is down, use
+> `knowledge/onprem-ospf-fault-runbook.md`. Only treat this as a pure BGP fault if
+> OSPF is **Full** and the peer loopback is present.
+
+Common root causes: BGP session down (neighbor unreachable / shutdown), **OSPF
+underlay down (peer loopback unreachable)**, transit link down, `network`
+statement removed, route-map/prefix-list filtering, or an
 AS-path/`ebgp-requires-policy` misconfiguration.
 
 ---
@@ -59,14 +69,18 @@ in the last 6h.
 > do NOT stay in config mode and silently fail to commit route-maps/neighbor policy).
 
 ```bash
-# 1. BGP session state (want: Established)
+# 0. OSPF underlay first — BGP peers over the loopbacks it carries
+docker exec clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor'   # want: Full
+docker exec clab-onprem-onprem-r1 vtysh -c 'show ip route 10.99.2.2' # want: O via eth1
+
+# 1. BGP session state (want: Established, peer 10.99.2.2 / 10.99.1.1)
 docker exec clab-onprem-onprem-r1 vtysh -c 'show ip bgp summary'
 docker exec clab-onprem-onprem-r2 vtysh -c 'show ip bgp summary'
 
-# 2. Is the LAN prefix present on r1?  (want: 172.31.20.0/24 via 172.31.12.2)
+# 2. Is the LAN prefix present on r1? (want: 172.31.20.0/24, recursive via 10.99.2.2)
 docker exec clab-onprem-onprem-r1 vtysh -c 'show ip route 172.31.20.0/24'
 
-# 3. Is the return prefix present on r2? (want: 172.31.11.0/30 via 172.31.12.1)
+# 3. Is the return prefix present on r2? (want: 172.31.11.0/30, recursive via 10.99.1.1)
 docker exec clab-onprem-onprem-r2 vtysh -c 'show ip route 172.31.11.0/30'
 
 # 4. Transit link up?
@@ -77,7 +91,10 @@ docker exec clab-onprem-onprem-r1 ping -c2 172.31.20.10
 ```
 
 Interpretation:
-- BGP **not** Established + no LAN route on r1 ⇒ control-plane fault (session/link).
+- **OSPF neighbor down / `10.99.2.2` route missing** ⇒ the BGP drop is a **symptom
+  of an OSPF underlay fault** — switch to `onprem-ospf-fault-runbook.md`.
+- BGP **not** Established with OSPF **Full** + peer loopback present ⇒ genuine
+  control-plane fault (session shut / policy).
 - BGP Established but **no** `172.31.20.0/24` ⇒ r2 stopped advertising it
   (missing `network` statement or filtering).
 - LAN route present but ping fails ⇒ data-plane / forwarding issue (`ip_forward`,
@@ -97,7 +114,7 @@ Manual equivalent for the session-down case (note the **heredoc**):
 docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
 configure terminal
 router bgp 65101
- neighbor 172.31.12.2 shutdown
+ neighbor 10.99.2.2 shutdown
 end
 EOF
 ```
@@ -113,7 +130,7 @@ CM probe → 100% loss; `netsre-clab-cm-checks-failed` fires within the alert wi
 docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
 configure terminal
 router bgp 65101
- no neighbor 172.31.12.2 shutdown
+ no neighbor 10.99.2.2 shutdown
 end
 EOF
 ```

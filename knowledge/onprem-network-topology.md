@@ -43,7 +43,9 @@ two-tier on-prem site. Nodes run **FRRouting 9.1** (`quay.io/frrouting/frr`).
    veth clabr1host                   eth2 .2   │ lo 10.99.1.1/32
    .1                                          │ eth1 172.31.12.1/30
                                                │
-                                     eBGP  AS65101 ⇄ AS65102
+                                OSPF area 0 (IGP underlay, carries loopbacks)
+                                     eBGP over loopbacks (multihop)
+                                     AS65101 ⇄ AS65102
                                                │  172.31.12.0/30 transit
                                                │
                                      onprem-r2 (core) eth1 172.31.12.2/30
@@ -57,19 +59,31 @@ two-tier on-prem site. Nodes run **FRRouting 9.1** (`quay.io/frrouting/frr`).
 
 | Node | Role | Loopback | Interfaces | Routing |
 |------|------|----------|------------|---------|
-| `onprem-r1` | WAN edge | `10.99.1.1/32` | `eth1 172.31.12.1/30` (transit), `eth2 172.31.11.2/30` (host probe) | **BGP AS65101**, peers r2 `172.31.12.2`; advertises `10.99.1.1/32`, `172.31.11.0/30` |
-| `onprem-r2` | Core | `10.99.2.2/32` | `eth1 172.31.12.2/30` (transit), `eth2 172.31.20.1/24` (LAN) | **BGP AS65102**, peers r1 `172.31.12.1`; advertises `10.99.2.2/32`, `172.31.20.0/24` |
+| `onprem-r1` | WAN edge | `10.99.1.1/32` | `eth1 172.31.12.1/30` (transit), `eth2 172.31.11.2/30` (host probe) | **OSPF area 0** on transit (carries loopbacks); **BGP AS65101** peers r2 loopback `10.99.2.2` (`update-source lo`, `ebgp-multihop 2`); advertises `172.31.11.0/30` into BGP |
+| `onprem-r2` | Core | `10.99.2.2/32` | `eth1 172.31.12.2/30` (transit), `eth2 172.31.20.1/24` (LAN) | **OSPF area 0** on transit; **BGP AS65102** peers r1 loopback `10.99.1.1` (`update-source lo`, `ebgp-multihop 2`); advertises `172.31.20.0/24` into BGP |
 | `onprem-host` | Server / probe target | — | `172.31.20.10/24`, default via `172.31.20.1` | serves HTTP :80 |
 
 ### Control plane
 
-- **eBGP** between `onprem-r1` (AS65101) and `onprem-r2` (AS65102) over the
-  transit `172.31.12.0/30`.
-- The **on-prem LAN** `172.31.20.0/24` is only reachable because r2 advertises it
-  into BGP and r1 accepts it. **Breaking the r1↔r2 BGP session (or link) withdraws
-  the LAN route** — the core blast radius fault for this fabric.
-- `onprem-r1` also advertises the host-facing `172.31.11.0/30` into BGP so the
-  **return path** from the LAN back to the Azure lab-host is *also* BGP-dependent.
+- **OSPF area 0** is the on-prem **IGP underlay**. It runs over the transit
+  `172.31.12.0/30` (`point-to-point`) and carries the router **loopbacks**
+  (`10.99.1.1/32`, `10.99.2.2/32`) — advertised **only via OSPF**, not BGP.
+- **eBGP** between `onprem-r1` (AS65101) and `onprem-r2` (AS65102) peers
+  **loopback-to-loopback** (`update-source lo`, `ebgp-multihop 2`, fast timers
+  `3 9`). Because each router can only reach the peer loopback via the
+  OSPF-learned route, **BGP is reliant on the OSPF underlay**.
+- The **on-prem LAN** `172.31.20.0/24` is reachable because r2 originates it into
+  BGP; `onprem-r1` originates the return `172.31.11.0/30`. On r1 the LAN route is
+  **recursive over `10.99.2.2`** (the OSPF-learned peer loopback).
+- **Cascade (the key design property):** breaking the r1↔r2 **OSPF adjacency**
+  withdraws the peer loopback → the loopback-peered **BGP session drops** → the
+  **LAN `172.31.20.0/24` is withdrawn** in both directions → the
+  `netsre-clab-connection-monitor` probe fails. So an **IGP fault now cascades all
+  the way to the data path** and is detectable, mirroring a real WAN "IGP underlay
+  + BGP over loopbacks" design. Fast OSPF (`dead-interval 8`) + BGP (`timers 3 9`)
+  make the cascade converge in ~15s.
+- Naturally, a direct **BGP session/policy fault or a transit-link fault** also
+  withdraws the LAN and fails the CM.
 
 ### Azure data-path integration (T3)
 

@@ -62,8 +62,14 @@ sudo containerlab destroy -t onprem.clab.yml          # tear down
 
 ```bash
 # Drop the eBGP session from the edge — LAN route disappears on r1
-docker exec -it clab-onprem-onprem-r1 vtysh -c 'conf t' \
-  -c 'router bgp 65101' -c 'neighbor 172.31.12.2 shutdown'
+docker exec -i clab-onprem-onprem-r1 vtysh <<'EOF'
+configure terminal
+router bgp 65101
+ neighbor 10.99.2.2 shutdown
+EOF
+
+# Or break OSPF (the underlay) — cascades to BGP + LAN via the loopback peering
+docker exec -it clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor'
 
 # Break the transit link entirely
 docker exec -it clab-onprem-onprem-r1 ip link set dev eth1 down
