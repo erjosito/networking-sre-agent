@@ -38,6 +38,21 @@ onprem-host ── 172.31.20.0/24 (LAN) ── onprem-r2 ══ eBGP over loopba
 >    path (`host veth clabr1host → clab-onprem-onprem-r1 → r2 → onprem-host`). A
 >    deallocated `netsre-onprem-frr` is a **red herring** for any `netsre-clab-*`
 >    alert — do **not** recommend starting it to fix a clab CM failure.
+
+> **Route ownership is DETERMINISTIC — do not "investigate who advertises what":**
+> - **`172.31.20.0/24` (host `172.31.20.10`) is ALWAYS originated by `onprem-r2`**
+>   (AS65102, `network 172.31.20.0/24`); `onprem-r1` learns it via eBGP, recursive
+>   over the OSPF loopback `10.99.2.2`. The answer to "which side should advertise
+>   172.31.20.10" is **always r2** — never treat it as an open question.
+> - **The clab CM does NOT traverse the Azure VPN.** The probe goes
+>   `netsre-onprem-clab host → veth clabr1host (172.31.11.1) → r1 → r2 → host`. It
+>   never touches the on-prem/hub VPN gateways. So **VPN gateway learned/advertised
+>   routes are IRRELEVANT** to a `netsre-clab-*` alert, and `172.31.20.0/24` is
+>   *not supposed* to appear on any gateway. Do **not** inspect gateway BGP or
+>   conclude a fault from "the gateway doesn't learn the LAN" — it never should.
+> - The real question is only **"why has r2's `172.31.20.0/24` stopped reaching
+>   r1/the host"** → OSPF adjacency down? BGP session down? prefix filtered? Go
+>   straight to `docker exec clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor'`.
 - **OSPF** (area 0, over the transit) is the **IGP underlay**. It carries **only
   the loopbacks** `10.99.1.1/32`, `10.99.2.2/32`.
 - **BGP** peers **loopback-to-loopback** (`update-source lo`, `ebgp-multihop 2`)

@@ -94,6 +94,33 @@ The Azure lab-host VM (`10.100.1.5`) has a host veth `clabr1host` =
 path is `host → r1 → eBGP → r2 → onprem-host`, so an r1↔r2 control-plane fault
 fails the probe in **both** directions and raises `netsre-clab-cm-checks-failed`.
 
+> **The clab CM does NOT traverse the Azure VPN.** The probe originates on the
+> Azure lab-host VM `netsre-onprem-clab` and enters the fabric **directly** over
+> the host veth `clabr1host` (`172.31.11.1 → 172.31.11.2` = r1). It never touches
+> the on-prem VPN gateway, the hub gateways, or the S2S tunnels. Therefore, for
+> any `netsre-clab-*` alert, the **VPN gateway learned/advertised routes are
+> IRRELEVANT** — `172.31.20.0/24` is a **fabric-internal** prefix and is *not
+> supposed* to appear on any Azure VPN gateway. Do **not** investigate gateway
+> BGP, and do **not** conclude a fault from "the gateway doesn't learn
+> 172.31.20.0/24" — it never should. Inspect the **fabric** (r1/r2 via
+> `docker exec … vtysh`) instead.
+
+### Deterministic route ownership (do not "investigate who advertises what")
+
+Ownership is fixed by config — treat it as ground truth, not something to discover:
+
+| Prefix | Originated by | Learned by | How |
+|--------|---------------|------------|-----|
+| `172.31.20.0/24` (LAN, host `.10`) | **`onprem-r2`** (AS65102) — `network 172.31.20.0/24` | `onprem-r1` via **eBGP**, recursive over OSPF loopback `10.99.2.2` | the answer to "which side advertises 172.31.20.10" is **always r2** |
+| `172.31.11.0/30` (host probe link) | **`onprem-r1`** (AS65101) | `onprem-r2` via eBGP | return path so r2 can reach the probe source |
+| `10.99.1.1/32`, `10.99.2.2/32` (loopbacks) | each router into **OSPF area 0** | the peer via OSPF | BGP `update-source lo` peers ride these |
+
+So when a clab CM fails, the question is **never** "which side should own the
+LAN" (it is r2, deterministically) — it is **"why has r2's `172.31.20.0/24` stopped
+reaching r1/the host"**, i.e. is the **OSPF adjacency** (loopback reachability)
+down, the **BGP session** down, or the **prefix filtered/withdrawn**. Go straight
+to `docker exec clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor'`.
+
 ---
 
 ## How to inspect the fabric
