@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "8095872221668979935"
+      "templateHash": "2830407340057214104"
     }
   },
   "parameters": {
@@ -77,7 +77,7 @@
     },
     "sreAgentMode": {
       "type": "string",
-      "defaultValue": "Review",
+      "defaultValue": "Autonomous",
       "allowedValues": [
         "Review",
         "Autonomous",
@@ -5583,7 +5583,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "10361647294794805338"
+              "templateHash": "832118016130428282"
             }
           },
           "parameters": {
@@ -5612,7 +5612,7 @@
             },
             "agentMode": {
               "type": "string",
-              "defaultValue": "Review",
+              "defaultValue": "Autonomous",
               "allowedValues": [
                 "Review",
                 "Autonomous",

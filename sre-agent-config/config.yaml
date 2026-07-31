@@ -5,6 +5,10 @@
 agent:
   name: netsre-sre-agent
   resourceGroup: netsre-rg
+  # Action mode for the live agent's actionConfiguration.mode.
+  # Autonomous = investigate AND remediate without waiting for user approval
+  # (Review would pause every incident/fix for manual approval → stuck flows).
+  mode: Autonomous
 
 # Knowledge base files to upload (relative to repo root)
 knowledge:
@@ -55,7 +59,7 @@ responsePlans:
     severity: [Sev1, Sev2]
     titleContains: ""
     customAgent: network-expert
-    autonomy: Review
+    autonomy: Autonomous
     cooldownHours: 3
     processingGuide:
       - "Determine the failing layer FIRST: is this an Azure hub-spoke path or an on-premises fabric alert (title/resource contains 'onprem' or 'clab')?"
@@ -67,7 +71,7 @@ responsePlans:
     severity: [Sev1, Sev2]
     titleContains: "clab"
     customAgent: network-expert
-    autonomy: Review
+    autonomy: Autonomous
     cooldownHours: 3
     processingGuide: &onpremGuide
       - "Use the on-prem-fabric-triage skill. STEP 1 (never skip): pull the EXACT triggering signal for the alert window. For a Connection Monitor alert, query NWConnectionMonitorTestResult for TestGroupName 'clabhost-to-infabric-server' (passed/failed by 1m). For a syslog alert, query Syslog | where Facility=='daemon' and SeverityLevel in ('error','critical','alert','emergency') | project TimeGenerated, HostName, ProcessName, SeverityLevel, SyslogMessage. Quote the actual message/failure."
@@ -82,7 +86,7 @@ responsePlans:
     severity: [Sev1, Sev2, Sev3]
     titleContains: "onprem"
     customAgent: network-expert
-    autonomy: Review
+    autonomy: Autonomous
     cooldownHours: 3
     processingGuide: *onpremGuide
   - name: latency-degradation
@@ -90,7 +94,7 @@ responsePlans:
     severity: [Sev4]
     titleContains: "latency"
     customAgent: network-expert
-    autonomy: Review
+    autonomy: Autonomous
     cooldownHours: 6
 
 # Scheduled tasks
@@ -131,7 +135,7 @@ scheduledTasks:
     description: Weekly review of Connection Monitor test results
     schedule: "0 9 * * 5"  # 9 AM UTC every Friday
     maxExecutions: 52
-    autonomy: Review
+    autonomy: Autonomous
     instructions: |
       Review Connection Monitor test results for the past 7 days in netsre-rg.
       1. Query the netsre-connection-monitor for all test groups

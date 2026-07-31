@@ -53,6 +53,8 @@ param(
     [SecureString]$AdminPassword,
     [string]$VpnSharedKey  = $env:VPN_SHARED_KEY ?? "TestVpnKey2025!",
     [bool]$DeploySreAgent  = $true,
+    [ValidateSet('Review','Autonomous','ReadOnly')]
+    [string]$SreAgentMode  = $env:SRE_AGENT_MODE ?? "Autonomous",
     [string]$SreAgentSponsorGroupId = $env:SRE_AGENT_SPONSOR_GROUP_ID ?? ""
 )
 
@@ -157,6 +159,7 @@ $ParamsObj = @{
         adminPassword  = @{ value = $PlainPassword }
         vpnSharedKey   = @{ value = $VpnSharedKey }
         deploySreAgent = @{ value = $DeploySreAgent }
+        sreAgentMode   = @{ value = $SreAgentMode }
     }
 }
 $ParamsObj | ConvertTo-Json -Depth 10 | Out-File $ParamsFile -Encoding utf8

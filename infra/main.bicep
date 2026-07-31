@@ -388,7 +388,7 @@ param sreAgentAccessLevel string = 'High'
 
 @description('SRE Agent mode: Review (propose+approve), Autonomous, or ReadOnly')
 @allowed(['Review', 'Autonomous', 'ReadOnly'])
-param sreAgentMode string = 'Review'
+param sreAgentMode string = 'Autonomous'
 
 @description('Default model for the SRE Agent. "Automatic" lets the service pick an available model in the region (recommended; avoids region-specific model availability failures).')
 param sreAgentModelName string = 'Automatic'

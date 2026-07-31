@@ -27,7 +27,7 @@ param accessLevel string = 'High'
 
 @description('Agent mode: Review (propose+approve), Autonomous, or ReadOnly')
 @allowed(['Review', 'Autonomous', 'ReadOnly'])
-param agentMode string = 'Review'
+param agentMode string = 'Autonomous'
 
 @description('Resource group IDs the agent should monitor (full resource IDs)')
 param managedResourceGroupIds array = []

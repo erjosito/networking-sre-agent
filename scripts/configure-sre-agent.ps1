@@ -176,21 +176,31 @@ if (-not $ManagedResourceGroupIds -or $ManagedResourceGroupIds.Count -eq 0) {
 # Determine drift.
 $incidentDrift = ($null -eq $curIncident) -or ($curIncident.type -ne $IncidentPlatform)
 $scopeDrift    = (@(Compare-Object -ReferenceObject $curScope -DifferenceObject $ManagedResourceGroupIds).Count -ne 0)
+$desiredMode   = if ($cfg.agent.mode) { [string]$cfg.agent.mode } else { 'Autonomous' }
+$curMode       = $props.actionConfiguration.mode
+$modeDrift     = ($curMode -ne $desiredMode)
 
 if ($incidentDrift) { Write-Chg "incident platform: '$(if($curIncident){$curIncident.type}else{'none'})' -> '$IncidentPlatform'" }
                 else { Write-Ok  "incident platform already '$IncidentPlatform'" }
 if ($scopeDrift)    { Write-Chg "managed scope -> $($ManagedResourceGroupIds -join ', ')" }
                 else { Write-Ok  "managed scope already correct" }
+if ($modeDrift)     { Write-Chg "agent mode: '$curMode' -> '$desiredMode'" }
+                else { Write-Ok  "agent mode already '$desiredMode'" }
 
-if ($Apply -and -not $SkipControlPlane -and ($incidentDrift -or $scopeDrift)) {
+if ($Apply -and -not $SkipControlPlane -and ($incidentDrift -or $scopeDrift -or $modeDrift)) {
     Write-Head "Applying control-plane PATCH"
     $bodyObj = @{
         properties = @{
             incidentManagementConfiguration = @{ type = $IncidentPlatform }
             knowledgeGraphConfiguration      = @{ managedResources = @($ManagedResourceGroupIds) }
+            actionConfiguration              = @{
+                mode        = $desiredMode
+                accessLevel = $props.actionConfiguration.accessLevel
+            }
         }
     }
     if ($kgIdentity) { $bodyObj.properties.knowledgeGraphConfiguration.identity = $kgIdentity }
+    if ($props.actionConfiguration.identity) { $bodyObj.properties.actionConfiguration.identity = $props.actionConfiguration.identity }
     $tmp = New-TemporaryFile
     ($bodyObj | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding utf8
     az rest --method patch --url $armUrl --headers "Content-Type=application/json" --body "@$($tmp.FullName)" -o none 2>$null
@@ -203,8 +213,10 @@ if ($Apply -and -not $SkipControlPlane -and ($incidentDrift -or $scopeDrift)) {
         $aScope    = @($after.properties.knowledgeGraphConfiguration.managedResources)
         if ($aIncident -eq $IncidentPlatform) { Write-Ok "incident platform now '$aIncident'" } else { Write-Miss "incident platform is '$aIncident'" }
         if (@(Compare-Object -ReferenceObject $aScope -DifferenceObject $ManagedResourceGroupIds).Count -eq 0) { Write-Ok "managed scope applied" } else { Write-Miss "managed scope mismatch: $($aScope -join ', ')" }
+        $aMode = $after.properties.actionConfiguration.mode
+        if ($aMode -eq $desiredMode) { Write-Ok "agent mode now '$aMode'" } else { Write-Miss "agent mode is '$aMode'" }
     }
-} elseif (-not $Apply -and ($incidentDrift -or $scopeDrift)) {
+} elseif (-not $Apply -and ($incidentDrift -or $scopeDrift -or $modeDrift)) {
     Write-Info2 "(report-only: re-run with -Apply to PATCH the control plane)"
 }
 
@@ -408,7 +420,7 @@ if ($prin) {
 Write-Info2 "Investigate: knowledge base — $($cfg.knowledge.Count) file(s); run with -Apply to (re)upload+index."
 
 # ROOT-CAUSE / FIX — autonomy + write access
-$mode = $props.actionConfiguration.mode
+$mode = if ($Apply -and -not $SkipControlPlane) { $desiredMode } else { $props.actionConfiguration.mode }
 $acc  = $props.actionConfiguration.accessLevel
 if ($acc -eq 'High') { Write-Ok "Fix: accessLevel=High (Contributor) — agent CAN remediate" }
 else { Write-Todo "Fix: accessLevel=$acc — agent can investigate but not change resources (set accessLevel=High to remediate)" }
