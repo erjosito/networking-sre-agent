@@ -1,5 +1,8 @@
 # Azure SRE Agent Configuration — How It Works
 
+> **📍 Part A — Azure Networking SRE** (shared agent plumbing, also used by Part B). See the [docs hub](./README.md).
+
+
 This document explains what it takes to turn the deployed Azure SRE Agent
 **resource** into a **working agent** that closes the incident loop:
 

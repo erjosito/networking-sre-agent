@@ -1,5 +1,8 @@
 # Containerlab on-prem fabric — how it works and how it is wired
 
+> **📍 Part B3 — Modeling on-prem networking with Containerlab.** See the [docs hub](./README.md).
+
+
 This document explains the **Part A2 (high-fidelity)** on-prem simulation: a small
 containerized network fabric that runs entirely inside a single Azure "lab host" VM
 (`infra/modules/onprem-containerlab.bicep`, deployed by

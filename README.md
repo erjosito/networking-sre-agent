@@ -1,19 +1,108 @@
 # Azure Networking SRE Agent — Test Environment
 
-A ready-to-deploy Azure lab that builds a **multi-hub, hub-spoke network topology** complete with VPN gateways, NVA firewalls, private endpoints, Application Gateway, Traffic Manager, and spoke workloads. It is designed to pair with the [Azure SRE Agent](https://sre.azure.com) (preview) so the agent can detect, investigate, and help resolve realistic networking incidents.
+## Why this repo
 
-The repository includes:
+The [Azure SRE Agent](https://sre.azure.com) can detect, investigate, and help
+remediate incidents — but to trust it with **networking**, you need a realistic
+environment that (a) breaks in realistic ways and (b) emits the telemetry a real
+operator would use to diagnose it. This repo is that environment: a **deploy-it-
+yourself lab** plus everything the agent needs to reason about it.
 
-- **Bicep infrastructure-as-code** for the full topology (hub/spoke networking, VPN, NVA, Private Link, AppGW, Traffic Manager)
-- **Knowledge base documents** (17 files) that teach the SRE Agent about Azure and on-premises networking
-- **Fault-injection scripts** with 33 scenarios across 7 failure categories (incl. an on-prem containerlab FRR fabric)
-- **Connection Monitors & alerts** covering 11 test groups to trigger the SRE Agent automatically
-- **Health check script** (20 validation sections) for end-to-end environment verification
-- **SRE Agent configuration artifacts** (custom agents, skills, response plans)
+It exists to answer two questions end-to-end:
 
-> **📚 Documentation:** In-depth guides live in [`docs/`](docs/README.md) — on-prem
-> device simulation, telemetry pipelines, the Containerlab fabric, and how the SRE
-> Agent is configured, consumes telemetry, and closes the incident loop.
+1. **Can an SRE Agent handle Azure networking incidents?** — a multi-hub hub-spoke
+   topology, a catalogue of injectable faults, and the knowledge/skills that let the
+   agent go from *alert* → *investigation* → *root cause* → *fix*.
+2. **Can we extend that story to on-premises networking?** — where devices speak
+   legacy protocols, telemetry arrives over syslog/SNMP/RADIUS, and the agent has no
+   built-in knowledge of your fabric. We model a real on-prem router fabric, stream
+   its telemetry into Azure Monitor, and teach the agent to triage it.
+
+## What it is
+
+- **Bicep infrastructure-as-code** for the full topology (hub/spoke networking, VPN,
+  NVA, Private Link, AppGW, Traffic Manager) **plus** an optional on-prem extension
+  (telemetry collector, RADIUS AAA, and a Containerlab FRR fabric).
+- **Knowledge base** (17 files) that teaches the SRE Agent about Azure *and* on-prem
+  networking, plus **custom sub-agents, skills, and incident response plans**.
+- **Fault-injection scripts** — 33 scenarios across 7 categories, including
+  control-plane faults inside the on-prem Containerlab fabric.
+- **Connection Monitors & alerts** — 11 test groups that trigger the agent
+  automatically — and a **health-check script** (20 sections) for verification.
+
+## How to use it
+
+1. **Deploy** the lab (`scripts/deploy.ps1`) — see [Quick Start](#quick-start).
+2. **Configure the agent** (`scripts/configure-sre-agent.ps1 -Apply`) — uploads
+   knowledge, applies sub-agents + response plans.
+3. **Inject a fault** (`scripts/inject-fault.ps1`) and watch the agent detect,
+   investigate, and (in Autonomous mode) remediate it.
+4. **Verify / tear down** with `scripts/check-health.ps1` and `scripts/teardown.ps1`.
+
+---
+
+## 🗺️ How this project is organized
+
+The repo is one lab told in **two parts**. Start with the part you care about.
+
+```mermaid
+flowchart TB
+    subgraph A["Part A — Azure Networking SRE (base lab)"]
+        direction LR
+        hubspoke["Hub-spoke topology<br/>VPN · NVA · PrivateLink · AppGW · TM"]
+        cm["Connection Monitors<br/>+ Azure Monitor alerts"]
+        hubspoke --> cm
+    end
+    subgraph B["Part B — On-prem extension"]
+        direction LR
+        clab["B3 · Containerlab FRR fabric<br/>(modeled on-prem site)"]
+        tele["B1 · Telemetry pipelines<br/>syslog · SNMP · RADIUS AAA"]
+        clab --> tele
+    end
+    A --> mon["Azure Monitor<br/>(logs · metrics · alerts)"]
+    B --> mon
+    mon --> agent{{"Azure SRE Agent"}}
+    know["B2 · Knowledge + skills<br/>+ response plans"] -.teaches.-> agent
+    agent --> loop["Detect → Investigate →<br/>Root cause → Fix"]
+    loop -.remediate.-> A
+    loop -.remediate.-> B
+
+    classDef base fill:#e6f2ff,stroke:#0078d4;
+    classDef ext fill:#e9f7ef,stroke:#2e8b57;
+    class A base
+    class B ext
+```
+
+### Part A — Azure Networking SRE *(the base story)*
+
+The hub-spoke Azure lab and the SRE Agent that watches it. Everything you need to
+deploy the topology, break it, and let the agent fix it lives in **this README**
+(Architecture, Quick Start, Fault Injection, Connection Monitors, Health Check) plus:
+
+- **[SRE Agent configuration — how it works](docs/sre-agent-configuration.md)** — the
+  two config planes (ARM + data plane), the detection model, and how
+  `configure-sre-agent.ps1 -Apply` turns a bare agent resource into a *working* one.
+
+### Part B — Extension to on-premises networking
+
+On-prem is different: legacy telemetry protocols and no built-in agent knowledge of
+your fabric. This part is covered by three concerns (read the
+[**docs hub**](docs/README.md) for the guided reading order):
+
+| # | Concern | Answers | Deep dive |
+|---|---------|---------|-----------|
+| **B1** | **On-prem telemetry → Azure** | How do syslog, SNMP metrics, and RADIUS AAA reach Azure Monitor? | [telemetry pipelines](docs/onprem-telemetry-pipelines-how-it-works.md) |
+| **B2** | **Agent knowledge, skills & closing the loop** | What must the agent *know* to triage on-prem faults, and how does it detect, reason, and act? | [SRE Agent telemetry & actuation](docs/sre-agent-telemetry-and-actuation.md), [`knowledge/`](knowledge/), [`sre-agent-config/skills/onprem-fabric-triage`](sre-agent-config/skills/onprem-fabric-triage) |
+| **B3** | **Modeling on-prem with Containerlab** | How does the lab simulate a real multi-router on-prem site (and inject control-plane faults)? | [Containerlab fabric](docs/containerlab-onprem-how-it-works.md) |
+
+> **Design rationale underpinning all of Part B:** [On-prem simulation &
+> telemetry — design & decisions](docs/onprem-network-simulation-and-telemetry.md)
+> explains *why* we simulate devices this way, the options considered, and the
+> data-plane-vs-control-plane detection strategy.
+>
+> **Build order note:** although B1 (telemetry) is the *goal* that motivated the
+> extension, when deploying you provision in dependency order — **model the devices
+> (B3) → stream their telemetry (B1) → teach the agent (B2)**.
 
 ---
 
@@ -385,6 +474,8 @@ Validate the entire environment with a comprehensive 20-section health check:
 
 ## Knowledge Base Files
 
+**Azure networking (Part A):**
+
 | File | Topics Covered |
 |------|----------------|
 | `azure-networking-fundamentals.md` | VNets, subnets, NSGs, UDRs, DNS, and peering |
@@ -401,6 +492,15 @@ Validate the entire environment with a comprehensive 20-section health check:
 | `virtual-wan.md` | Virtual WAN hubs, routing intent, secured hubs |
 | `13-private-link-and-dns.md` | Private Link service, endpoint creation, DNS integration patterns |
 
+**On-prem extension (Part B):**
+
+| File | Topics Covered |
+|------|----------------|
+| `onprem-network-topology.md` | Containerlab fabric ground truth: nodes, interfaces, ASNs, OSPF-underlay/loopback-BGP cascade, deterministic route ownership |
+| `onprem-ospf-fault-runbook.md` | OSPF fault diagnosis (adjacency, area/MTU/network-type), OSPF→BGP→LAN→CM cascade |
+| `onprem-bgp-fault-runbook.md` | BGP session/policy fault diagnosis over the OSPF underlay |
+| `onprem-telemetry-and-observability.md` | Exact KQL/metric schema for syslog, SNMP metrics, RADIUS AAA |
+
 ---
 
 ## Project Structure
@@ -408,7 +508,7 @@ Validate the entire environment with a comprehensive 20-section health check:
 ```
 networking-sre-agent/
 ├── README.md
-├── .gitignore
+├── docs/                                # Human-facing guides (see docs/README.md)
 ├── knowledge/                           # SRE Agent knowledge base (17 files)
 │   ├── azure-networking-fundamentals.md
 │   ├── hub-spoke-topology.md
@@ -422,14 +522,24 @@ networking-sre-agent/
 │   ├── azure-firewall-and-ddos.md
 │   ├── azure-front-door.md
 │   ├── virtual-wan.md
-│   └── 13-private-link-and-dns.md
+│   ├── 13-private-link-and-dns.md
+│   ├── onprem-network-topology.md       # ┐ on-prem (Part B)
+│   ├── onprem-ospf-fault-runbook.md     # │
+│   ├── onprem-bgp-fault-runbook.md      # │
+│   └── onprem-telemetry-and-observability.md  # ┘
 ├── infra/                               # Bicep infrastructure templates
 │   ├── main.bicep                       # Top-level orchestration
 │   ├── main.bicepparam                  # Default parameters
+│   ├── cloud-init/                      # VM bootstrap (FRR router, collector)
+│   ├── containerlab/                    # On-prem Containerlab fabric (Part B3)
+│   │   ├── onprem.clab.yml              # Topology definition
+│   │   └── configs/{r1,r2}/             # FRR + daemons configs
 │   └── modules/
 │       ├── hub.bicep                    # Hub VNet, NVA, LB, route tables, NSGs
 │       ├── spoke.bicep                  # Spoke VNet, VM, peering
 │       ├── onprem.bicep                 # On-prem VNet, VPN GW, test VM
+│       ├── onprem-collector.bicep       # Telemetry collector (syslog/SNMP) (Part B1)
+│       ├── onprem-aaa.bicep             # RADIUS AAA audit pipeline (Part B1)
 │       ├── vpn-connections.bicep        # S2S VPN connections with BGP
 │       ├── private-link.bicep           # Storage Account, PE, DNS zone
 │       ├── appgw.bicep                  # Application Gateway + WAF
@@ -443,6 +553,7 @@ networking-sre-agent/
 │   ├── teardown.ps1                     # Resource group deletion
 │   ├── inject-fault.ps1                 # Fault injection (33 scenarios)
 │   ├── check-health.ps1                 # Environment health validation (20 sections)
+│   ├── configure-sre-agent.ps1          # Apply agent config (knowledge, agents, plans)
 │   └── upload-knowledge.ps1             # Upload knowledge to SRE Agent
 ├── sre-agent-config/                    # SRE Agent configuration artifacts
 │   ├── config.yaml                      # Declarative config manifest
@@ -452,7 +563,8 @@ networking-sre-agent/
 │   └── skills/
 │       ├── nva-troubleshooting/SKILL.md
 │       ├── vpn-bgp-diagnostics/SKILL.md
-│       └── private-endpoint-dns/SKILL.md
+│       ├── private-endpoint-dns/SKILL.md
+│       └── onprem-fabric-triage/SKILL.md  # On-prem control-plane triage (Part B2)
 └── ref/                                 # Reference material (not committed)
 ```
 

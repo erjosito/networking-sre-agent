@@ -1,5 +1,8 @@
 # How the SRE Agent Consumes On-Prem Telemetry & Closes the Loop
 
+> **📍 Part B2 — Teaching the SRE Agent: knowledge, skills & closing the loop.** See the [docs hub](./README.md).
+
+
 This document explains what the **Azure SRE Agent** does with the on-prem telemetry
 once it lands in Azure Monitor: how it **reads** the signals to investigate an
 incident (§1), and how it could **run remediation commands** back on the legacy

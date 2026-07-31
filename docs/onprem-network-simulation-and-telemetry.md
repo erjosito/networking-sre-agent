@@ -1,5 +1,8 @@
 # Extending the SRE Agent Story to On-Premises Networking
 
+> **📍 Part B — design rationale** that underpins B1 (telemetry), B2 (agent knowledge/skills), and B3 (Containerlab modeling). See the [docs hub](./README.md).
+
+
 > **Status:** Design exploration / RFC
 > **Audience:** Maintainers of `networking-sre-agent`
 > **Goal:** Evaluate how to (a) *simulate* on-premises network devices, (b) make their
@@ -39,6 +42,30 @@ The extension therefore has **three** independent problems:
 
 > **Terminology note:** the metrics protocol for legacy network gear is **SNMP** (Simple Network
 > Management Protocol). The rest of this document uses SNMP.
+
+### The three problems at a glance
+
+```mermaid
+flowchart LR
+    subgraph device["Simulated on-prem device (Problem 1)"]
+        frr["FRR router / Containerlab fabric<br/>routing · config · control-plane state"]
+    end
+    frr -->|"syslog"| law[("Log Analytics")]
+    frr -->|"SNMP metrics"| metrics[("Azure Monitor Metrics")]
+    frr -->|"RADIUS AAA<br/>(who did what)"| law
+    subgraph tele["Telemetry (Problem 2) + Auditing (Problem 3)"]
+        law
+        metrics
+    end
+    law --> alerts["Azure Monitor alerts"]
+    metrics --> alerts
+    cm["Connection Monitor<br/>(data-plane probe)"] --> alerts
+    alerts --> agent{{"Azure SRE Agent<br/>detect → investigate → fix"}}
+    agent -.actuation.-> frr
+
+    classDef ext fill:#e9f7ef,stroke:#2e8b57;
+    class device,tele ext
+```
 
 ---
 

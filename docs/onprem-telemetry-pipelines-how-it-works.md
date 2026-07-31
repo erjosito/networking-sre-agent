@@ -1,5 +1,8 @@
 # On-Prem Telemetry Pipelines — How It Works
 
+> **📍 Part B1 — Bringing on-prem telemetry to Azure.** See the [docs hub](./README.md).
+
+
 This document explains, end to end, how telemetry from the simulated on-prem
 network devices reaches Azure Monitor. It covers the **three concrete pipelines**
 that are implemented in this repository:
