@@ -98,6 +98,14 @@ fails the probe in **both** directions and raises `netsre-clab-cm-checks-failed`
 
 ## How to inspect the fabric
 
+> **The clab Connection Monitor's source VM `netsre-onprem-clab` (10.100.1.5) is
+> also the fabric host** — the routers are Docker containers on it. For a
+> `netsre-clab-*` alert, inspect the fabric **on that same VM** with `docker exec
+> … vtysh`; a missing host-level `vtysh` is expected and does **not** mean "no
+> router here". Do **not** confuse it with `netsre-onprem-frr` (10.100.1.201, the
+> Stage-1 router VM, often deallocated) — that VM is **not** in the clab probe
+> path, so a deallocated `netsre-onprem-frr` is a red herring for clab CM alerts.
+
 ```bash
 # On the netsre-onprem-clab VM (10.100.1.5):
 sudo containerlab inspect -t /opt/onprem/onprem.clab.yml

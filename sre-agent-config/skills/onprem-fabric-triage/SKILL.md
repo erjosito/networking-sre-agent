@@ -25,6 +25,19 @@ onprem-host ── 172.31.20.0/24 (LAN) ── onprem-r2 ══ eBGP over loopba
 ```
 
 - Containers: `clab-onprem-onprem-r1`, `clab-onprem-onprem-r2`, `clab-onprem-onprem-host`.
+
+> **Two misdirections to avoid (they waste the whole investigation):**
+> 1. **The clab CM alert's SOURCE endpoint IS `netsre-onprem-clab` (10.100.1.5)** —
+>    that *same* VM hosts the FRR routers as Docker containers. So run the Step-3
+>    protocol checks **there**, via `az vm run-command` + `docker exec
+>    clab-onprem-onprem-r1 vtysh -c '…'`. Plain `vtysh`/`vtysh not found` on the
+>    host is expected — the routing daemons live **inside the containers**, not on
+>    the host. Never conclude "no BGP speaker here" from a missing host `vtysh`.
+> 2. **`netsre-onprem-frr` (10.100.1.201) is a DIFFERENT VM** — the Stage-1
+>    router-on-a-stick, frequently **deallocated**, and **NOT** in the clab probe
+>    path (`host veth clabr1host → clab-onprem-onprem-r1 → r2 → onprem-host`). A
+>    deallocated `netsre-onprem-frr` is a **red herring** for any `netsre-clab-*`
+>    alert — do **not** recommend starting it to fix a clab CM failure.
 - **OSPF** (area 0, over the transit) is the **IGP underlay**. It carries **only
   the loopbacks** `10.99.1.1/32`, `10.99.2.2/32`.
 - **BGP** peers **loopback-to-loopback** (`update-source lo`, `ebgp-multihop 2`)
