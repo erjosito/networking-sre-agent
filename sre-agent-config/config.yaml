@@ -19,7 +19,7 @@ knowledge:
   - knowledge/network-security-nva.md
   - knowledge/load-balancing-services.md
   - knowledge/dns-and-private-link.md
-  - knowledge/13-private-link-and-dns.md
+  - knowledge/private-link-and-dns.md
   - knowledge/monitoring-troubleshooting.md
   - knowledge/common-failure-scenarios.md
   - knowledge/azure-firewall-and-ddos.md

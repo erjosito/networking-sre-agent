@@ -552,7 +552,7 @@ Validate the entire environment with a comprehensive 20-section health check:
 | `azure-firewall-and-ddos.md` | Azure Firewall, DDoS Protection, threat intelligence |
 | `azure-front-door.md` | Front Door routing, WAF policies, caching |
 | `virtual-wan.md` | Virtual WAN hubs, routing intent, secured hubs |
-| `13-private-link-and-dns.md` | Private Link service, endpoint creation, DNS integration patterns |
+| `private-link-and-dns.md` | Private Link service, endpoint creation, DNS integration patterns |
 
 **On-prem extension (Part B):**
 
@@ -584,7 +584,7 @@ networking-sre-agent/
 │   ├── azure-firewall-and-ddos.md
 │   ├── azure-front-door.md
 │   ├── virtual-wan.md
-│   ├── 13-private-link-and-dns.md
+│   ├── private-link-and-dns.md
 │   ├── onprem-network-topology.md       # ┐ on-prem (Part B)
 │   ├── onprem-ospf-fault-runbook.md     # │
 │   ├── onprem-bgp-fault-runbook.md      # │
