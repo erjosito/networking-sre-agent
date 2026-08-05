@@ -79,6 +79,44 @@ The hub-spoke Azure lab and the SRE Agent that watches it. Everything you need t
 deploy the topology, break it, and let the agent fix it lives in **this README**
 (Architecture, Quick Start, Fault Injection, Connection Monitors, Health Check) plus:
 
+#### Why networking SRE is a different (and harder) problem
+
+Most SRE Agent demos are **application- or platform-centric**: a pod crash-loops, a
+service returns 500s, CPU spikes, a deployment rolls back. The telemetry points
+fairly directly at the culprit, and the fix lives in one place — a manifest, a
+config value, a scaling knob.
+
+**Networking is the opposite.** The symptom is almost always the same vague signal —
+*"the app can't reach the storage account"*, *"connectivity is intermittent"*,
+*"DNS sometimes fails"* — but the root cause hides in **one of many stacked
+infrastructure layers**: effective routes and UDRs, NVA IP-forwarding (NIC *and* OS
+level), iptables, BGP route propagation, VPN/peering transit, NSGs, dnsmasq, Private
+DNS zone links, Private Endpoint system routes. The distance between *where it hurts*
+and *where it's broken* is what makes these incidents so expensive.
+
+These are the faults that take even **experienced Azure network admins hours** —
+because the symptom is identical across a dozen unrelated causes and none of them are
+visible without cross-correlating routing tables, effective routes, DNS resolution
+paths, and actual packet flow. A few the lab encodes on purpose:
+
+- A **UDR next-hop off by one** — traffic silently black-holes; every resource looks
+  "healthy".
+- **BGP route propagation disabled** on a spoke route table — on-prem routes vanish,
+  but only for some destinations.
+- A **/32 Private Endpoint system route** quietly overriding your carefully-authored
+  UDR, so the PE is reachable but return traffic bypasses the NVA.
+- **dnsmasq bound to `127.0.0.1`** — the process is up, the port answers locally, yet
+  every VM's resolution fails.
+- A **Private DNS zone linked to the wrong VNet**, or **VNet DNS reset to Azure
+  default** — so *only* Private Link breaks while everything else works perfectly.
+
+The fault catalogue deliberately favors **subtle, realistic misconfigurations over
+obvious outages**. That's the whole point: this lab proves the agent can compress
+**hours of multi-layer, cross-resource correlation into minutes** — the part of
+networking incident response that actually hurts.
+
+**Deep dive on the agent itself:**
+
 - **[SRE Agent configuration — how it works](docs/sre-agent-configuration.md)** — the
   two config planes (ARM + data plane), the detection model, and how
   `configure-sre-agent.ps1 -Apply` turns a bare agent resource into a *working* one.

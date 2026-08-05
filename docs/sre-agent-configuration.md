@@ -104,7 +104,109 @@ tenant"* — but the data-plane `extendedAgent/apply` path above sidesteps it fo
 
 ---
 
-## 2. What makes a "working" agent
+## 2. The configuration object model — how the pieces relate
+
+Section 1 covered *where* each object is applied (control plane vs. data plane). This
+section covers *how they relate to each other at runtime* — i.e. what actually happens
+to an incident once it lands, and which object feeds which.
+
+```mermaid
+flowchart TB
+    inc["🔔 Azure Monitor incident<br/>(severity + title)"]
+
+    subgraph AR["Agent resource (ARM) — owns it all"]
+        direction LR
+        idn["Managed identity + RBAC"]
+        plat["Incident platform = AzMonitor"]
+        scope["Knowledge-graph scope = [rg]"]
+    end
+
+    subgraph RP["Incident response plan (1 = filter + handler)"]
+        direction LR
+        F["Filter<br/>severity · titleContains<br/>agentMode · merge"]
+        H["Handler<br/>processingGuide (ordered steps)"]
+        F -->|incidentFilterId| H
+    end
+
+    subgraph SA["Custom sub-agents (the 'experts')"]
+        direction LR
+        NE["network-expert"]
+        CT["connectivity-triage"]
+    end
+
+    KB[("Knowledge base<br/>18 indexed docs · RAG")]
+    SK["Skills (procedures)<br/>nva · vpn-bgp · pe-dns<br/>onprem-fabric-triage"]
+    TL["Tools / connectors<br/>az · Log Analytics · vm run-command"]
+    ST["Scheduled tasks (cron)<br/>proactive health checks"]
+
+    inc -->|matched by| F
+    H -->|handlingAgent| NE
+    H -.injects processingGuide.-> NE
+    CT -.handoff.-> NE
+    NE -->|retrieves context| KB
+    NE -->|follows step-by-step| SK
+    NE -->|runs diagnostics| TL
+    SK -. also uploaded into .-> KB
+    ST -->|reuses| NE
+    ST --> TL
+    AR -.governs identity/scope for.-> SA
+
+    classDef res fill:#e6f2ff,stroke:#0078d4;
+    classDef plan fill:#fff4e6,stroke:#d97706;
+    classDef agent fill:#e9f7ef,stroke:#2e8b57;
+    classDef data fill:#f3e8ff,stroke:#7c3aed;
+    class AR res
+    class RP plan
+    class SA agent
+    class KB,SK,TL,ST data
+```
+
+**Read the diagram as the life of one incident:**
+
+1. **Incident → Filter.** A fired Azure Monitor alert is claimed by the first
+   **response-plan filter** whose `severity` + `titleContains` match. In this repo the
+   on-prem plans narrow by title (`clab`, `onprem`) while `connectivity-failure` is the
+   catch-all for Sev1/Sev2 — so one alert can match more than one plan.
+2. **Filter → Handler.** Each filter has exactly one **handler** (`incidentFilterId`
+   links them). The handler carries the ordered **`processingGuide`** — the incident-
+   specific playbook the agent must follow.
+3. **Handler → Sub-agent.** The handler's **`handlingAgent`** names the **custom
+   sub-agent** that runs the investigation (here, always `network-expert`). The
+   handler *injects* its `processingGuide` into that agent's context for this incident.
+4. **Sub-agent → Knowledge / Skills / Tools.** The sub-agent reasons using three shared
+   inputs: the **knowledge base** (retrieval-augmented reference docs), **skills**
+   (step-by-step procedures like `onprem-fabric-triage`), and **tools/connectors** (`az`,
+   Log Analytics queries, `az vm run-command`). Knowledge is *reference*; a skill is
+   *procedure*; tools are *action*.
+5. **Scheduled tasks** are a **second, incident-free entry point**: cron-driven
+   investigations that reuse the same sub-agent, knowledge and tools without any filter.
+6. **The agent resource** (ARM) is the container that owns the identity, RBAC, incident
+   platform and knowledge-graph scope that make *all* of the above possible.
+
+### Object reference
+
+| Object | What it is | References / contains | Applied via |
+|--------|------------|-----------------------|-------------|
+| **Agent resource** | The ARM resource + managed identity | RBAC, `incidentManagementConfiguration`, `knowledgeGraphConfiguration` | `sre-agent.bicep` + ARM PATCH |
+| **Knowledge base** | Indexed reference docs (RAG corpus) | 18 markdown files (`config.yaml → knowledge:`) | `agentmemory/upload` |
+| **Skill** | A procedural runbook (`SKILL.md`) | Ordered troubleshooting steps | Portal *(also uploaded as knowledge)* |
+| **Custom sub-agent** | A named expert persona | `system_prompt`, `handoff_description`, built-in `tools` | `extendedAgent/apply` |
+| **Response plan** | Filter **+** handler pair | filter → severity/title; handler → `processingGuide` **+** `handlingAgent` (a sub-agent) | `incidentplayground/filters` + `/handlers` |
+| **Scheduled task** | Cron-driven proactive investigation | `schedule`, `instructions`, autonomy | Portal |
+
+> **Key relationships in one line:** a **response plan** *routes* a matching **incident**
+> to a **sub-agent** and *hands it* a **processingGuide**; the sub-agent *reads* the
+> **knowledge base**, *follows* **skills**, and *acts* through **tools** — all inside the
+> scope and identity owned by the **agent resource**.
+
+> **Why the `onprem-fabric-triage` skill is *also* a knowledge file:** skills are still
+> portal-only, so uploading the same `SKILL.md` into the knowledge base guarantees the
+> procedure is retrievable by the sub-agent even when no portal skill is attached (see
+> `config.yaml → knowledge:`).
+
+---
+
+## 3. What makes a "working" agent
 
 All of the following must hold for a full detect → investigate → root-cause → fix loop.
 `configure-sre-agent.ps1` verifies the automatable ones in its **Working-agent readiness**
@@ -130,7 +232,7 @@ custom agent or act — so applying the plans is what actually closes the loop.
 
 ---
 
-## 3. How detection actually works
+## 4. How detection actually works
 
 The agent does **not** rely on an action group being pointed at it. Instead, a scanner
 **polls the Azure Monitor Alerts Management API** on a schedule and turns fired alerts into
@@ -177,7 +279,7 @@ repo and verified by the readiness script:
 
 ---
 
-## 4. Applying the configuration
+## 5. Applying the configuration
 
 ### Automatically, during deployment
 `deploy.ps1` runs the configurator post-deploy (when `-DeploySreAgent`, non-fatal on error):
@@ -219,7 +321,7 @@ propose + wait for approval). Docs:
 
 ---
 
-## 5. Known caveats
+## 6. Known caveats
 
 - **Portal "incident platform" panel may show "not connected"** even though
   `incidentManagementConfiguration.type=AzMonitor` is set and confirmed via ARM GET. The
@@ -240,7 +342,7 @@ propose + wait for approval). Docs:
 
 ---
 
-## 6. References
+## 7. References
 
 - Azure Monitor alerts in SRE Agent — <https://learn.microsoft.com/azure/sre-agent/azure-monitor-alerts>
 - Incident response plans — <https://learn.microsoft.com/azure/sre-agent/incident-response-plans>

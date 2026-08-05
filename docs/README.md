@@ -36,11 +36,21 @@ it with injected faults, and let the agent detect → investigate → root-cause
 The lab and fault catalogue are documented in the [repository README](../README.md);
 the agent itself is covered here:
 
+> **Why networking SRE is different:** most SRE Agent demos are application/platform-
+> centric, where telemetry points fairly directly at the culprit. Networking is the
+> opposite — the same vague symptom (*"can't reach the storage account"*) can be rooted
+> in any of many stacked layers (UDRs, NVA forwarding, BGP propagation, NSGs, dnsmasq,
+> Private DNS links, PE system routes). The lab deliberately encodes **subtle
+> misconfigurations that take experienced Azure admins hours** to isolate — so it can
+> show the agent compressing that multi-layer correlation into minutes. See
+> [*Why networking SRE is a different (and harder) problem*](../README.md#why-networking-sre-is-a-different-and-harder-problem).
+
 - **[SRE Agent configuration — how it works](./sre-agent-configuration.md)**
   How a bare SRE Agent *resource* becomes a **working** agent: the two config planes
-  (programmatic ARM + data plane), the incident **detection** model (1-minute
-  Alerts-API scan), the detect → investigate → root-cause → fix requirements, and how
-  `configure-sre-agent.ps1 -Apply` applies the whole loop — including the custom
+  (programmatic ARM + data plane), **how the configuration objects relate** (response
+  plans → sub-agents → knowledge/skills/tools), the incident **detection** model
+  (1-minute Alerts-API scan), the detect → investigate → root-cause → fix requirements,
+  and how `configure-sre-agent.ps1 -Apply` applies the whole loop — including the custom
   (sub)agents and incident response plans. *(This agent plumbing is shared by Part B.)*
 
 ---
