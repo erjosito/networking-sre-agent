@@ -339,6 +339,10 @@ propose + wait for approval). Docs:
 - **Windows CLI quoting:** `az ... --query "length([?x])"` can lose its quotes on Windows;
   the readiness check parses JSON in PowerShell instead. KQL string literals passed to
   `az monitor log-analytics query` must use **single** quotes.
+- **Alert→incident mapping limitations:** the dedup/merge logic is keyed on alert-rule
+  identity, so distinct occurrences can merge into one stale incident while multiple
+  alerts for one root cause (e.g. a CM failure + a BGP-adjacency syslog) stay
+  uncorrelated. See [alert→incident mapping limitations](./sre-agent-incident-mapping-limitations.md).
 
 ---
 

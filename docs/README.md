@@ -53,6 +53,12 @@ the agent itself is covered here:
   and how `configure-sre-agent.ps1 -Apply` applies the whole loop — including the custom
   (sub)agents and incident response plans. *(This agent plumbing is shared by Part B.)*
 
+- **[SRE Agent — alert→incident mapping limitations](./sre-agent-incident-mapping-limitations.md)**
+  Testing findings on where the agent's dedup/merge logic surprised us: distinct
+  occurrences merging into one stale incident, and one root cause producing multiple
+  uncorrelated incidents (a CM alert + a BGP-adjacency syslog never folded into one),
+  plus related incident-lifecycle limitations and the workarounds in this repo.
+
 ---
 
 ## Part B — Extension to on-premises networking
