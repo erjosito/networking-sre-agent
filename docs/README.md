@@ -59,6 +59,12 @@ the agent itself is covered here:
   uncorrelated incidents (a CM alert + a BGP-adjacency syslog never folded into one),
   plus related incident-lifecycle limitations and the workarounds in this repo.
 
+- **[SRE Agent — live demo runbook](./demo-runbook.md)**
+  The video/recording playbook: a one-command orchestrator (`scripts/demo.ps1`) that
+  clears stale incidents, injects a curated fault (Azure UDR black-hole or on-prem OSPF
+  cascade), live-tails the agent's detect → investigate → root-cause → fix, then reverts.
+  Includes pre-flight checklist, talk track, timing, and troubleshooting.
+
 ---
 
 ## Part B — Extension to on-premises networking
@@ -118,6 +124,8 @@ faults that cascade to a detectable Connection Monitor failure.*
 | Doc | Part | Type | Answers |
 |-----|------|------|---------|
 | [sre-agent-configuration](./sre-agent-configuration.md) | A | Implementation | How is the agent configured to detect & fix? |
+| [sre-agent-incident-mapping-limitations](./sre-agent-incident-mapping-limitations.md) | A | Testing findings | Where does the agent's dedup/merge logic surprise us? |
+| [demo-runbook](./demo-runbook.md) | A | Runbook | How do I record a live detect→fix demo? |
 | [onprem-network-simulation-and-telemetry](./onprem-network-simulation-and-telemetry.md) | B (rationale) | Design / decisions | Which simulation & telemetry approach, and why? |
 | [onprem-telemetry-pipelines-how-it-works](./onprem-telemetry-pipelines-how-it-works.md) | B1 | Implementation | How does telemetry actually reach Azure Monitor? |
 | [sre-agent-telemetry-and-actuation](./sre-agent-telemetry-and-actuation.md) | B2 | Concept / design | How does the agent read telemetry & act on devices? |

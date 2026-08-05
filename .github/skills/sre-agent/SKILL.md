@@ -18,6 +18,9 @@ scripts/check-health.ps1      — 20-section environment validation
 scripts/inject-fault.ps1      — 33 fault scenarios across 7 categories (incl. 7 containerlab on-prem faults)
 scripts/upload-knowledge.ps1  — Print manual knowledge-upload instructions (portal; superseded by configure-sre-agent.ps1 -Apply)
 scripts/configure-sre-agent.ps1 — Apply agent config: ARM AzMonitor+scope (2026-01-01) + data-plane knowledge upload; -Apply to write, default report-only
+scripts/clear-incidents.ps1   — Delete SRE Agent incident threads (data-plane DELETE); .sh variant too
+scripts/watch-incidents.ps1   — Live-tail an incident investigation (for on-camera demos)
+scripts/demo.ps1              — One-command live demo: clear→inject→watch→revert (see docs/demo-runbook.md)
 sre-agent-config/             — Agent config manifest, custom agents, skills
 knowledge/                    — 17 markdown files for SRE Agent knowledge base (incl. 4 on-prem: topology, telemetry, BGP + OSPF runbooks)
 ref/                          — Reference material (gitignored, not committed)

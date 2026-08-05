@@ -305,6 +305,21 @@ Both resolve the agent name/RG from `sre-agent-config/config.yaml`, delete via t
 data-plane `DELETE /api/v1/threads/{id}` endpoint, and preserve the onboarding
 thread unless `-All` / `--all` is given.
 
+### Recording a live demo
+
+For a repeatable, on-camera walkthrough of the agent detecting → investigating →
+root-causing → fixing a fault, use the one-command orchestrator (clear → inject →
+watch → revert):
+
+```powershell
+.\scripts\demo.ps1 -Scenario clab  -Interactive   # on-prem fabric OSPF cascade (flagship)
+.\scripts\demo.ps1 -Scenario azure -Interactive   # Azure UDR next-hop black-hole
+```
+
+It clears stale incidents, injects a curated fault, live-tails the incident thread
+(`watch-incidents.ps1` prints each agent step and the tools it uses), then reverts.
+Full talk track, shot list, timing, and troubleshooting: **[docs/demo-runbook.md](docs/demo-runbook.md)**.
+
 ### Available Scenarios (33 total)
 
 #### IP Forwarding (2 scenarios)
@@ -618,6 +633,8 @@ networking-sre-agent/
 │   ├── configure-sre-agent.ps1          # Apply agent config (knowledge, agents, plans)
 │   ├── clear-incidents.ps1              # Delete SRE Agent incidents (PowerShell)
 │   ├── clear-incidents.sh               # Delete SRE Agent incidents (bash: az+curl+jq)
+│   ├── watch-incidents.ps1              # Live-tail an incident investigation (demo)
+│   ├── demo.ps1                         # One-command live demo (clear→inject→watch→revert)
 │   └── upload-knowledge.ps1             # Upload knowledge to SRE Agent
 ├── sre-agent-config/                    # SRE Agent configuration artifacts
 │   ├── config.yaml                      # Declarative config manifest
