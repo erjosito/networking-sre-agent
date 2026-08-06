@@ -11,7 +11,8 @@ Two takes are provided, both driven by the same one command:
 | **A — Azure** | `.\scripts\demo.ps1 -Scenario azure -Interactive` | `udr-wrong-nexthop` | A spoke's default route next-hop is repointed to an unreachable IP — the classic *"next-hop off by one"* black-hole. Every resource still looks healthy; only the Connection Monitors fail. |
 | **B — On-prem fabric** | `.\scripts\demo.ps1 -Scenario clab -Interactive` | `clab-ospf-area-mismatch` | An OSPF area mismatch on the containerlab fabric drops the adjacency, withdraws the peer loopback, tears down BGP-over-loopback, and withdraws the LAN — a **control-plane cascade** the agent must unwind OSPF-first. |
 
-Each take runs the same four phases: **clear → inject → watch → revert.**
+Each take runs the same phases: **pre-flight → inject → watch → revert** (pre-flight always
+runs and folds the incident-clear and a clean-baseline check into itself).
 
 ---
 
@@ -27,16 +28,20 @@ minutes instead of hours.
 
 ## 1. Pre-flight checklist (before you hit record)
 
-> **The demo script now automates most of this in Step 0.** `demo.ps1` (unless you pass
-> `-SkipPreflight`) verifies `az login`, **starts the scenario's Connection-Monitor source VMs**
-> if they are deallocated, and for the clab take **rebuilds the fabric + host-probe wiring** if the
-> host→LAN probe is broken. Run `.\scripts\demo.ps1 -Scenario clab -PreflightOnly` to warm and
-> verify the lab ahead of time. The items below are what the script does *for* you (✅) versus what
-> still needs your eyes (⚠️).
+> **The demo script does this automatically — Step 0 pre-flight ALWAYS runs and auto-fixes.**
+> There is no way to skip it (and no reason to): a clean baseline is what makes the demo
+> repeatable. `demo.ps1` verifies `az login`, **starts every deallocated lab VM**, (clab)
+> **rebuilds the fabric + host-probe wiring** if broken, **deletes any existing SRE Agent
+> incidents**, and then **waits until the scenario's Connection Monitors report GREEN** before it
+> will inject. Run `.\scripts\demo.ps1 -Scenario clab -PreflightOnly` to warm and verify the lab
+> ahead of time. The items below are what the script does *for* you (✅) versus what still needs
+> your eyes (⚠️).
 
-- ✅ **VMs started.** Step 0 starts the source VMs for the take (spoke11 VM for Azure;
-  `netsre-onprem-clab` for clab) and waits until they report *running* — deallocated VMs report
-  *Unknown*, not pass/fail.
+- ✅ **All VMs started.** Step 0 enumerates every VM in the resource group and starts the ones that
+  are deallocated, then waits until they report *running*. This matters because a down VM — whether
+  a CM **source or destination** — fails its Connection Monitor and fires alerts (and opens
+  incidents) that have nothing to do with the demo. Starting only the scenario's source VM is not
+  enough; the whole lab must be up for a clean green baseline.
 - ✅ **clab fabric + host-probe wiring.** The `clabr1host` veth IP and LAN route (and the FRR
   container fabric) are not durable across a VM stop/start; Step 0 probes `172.31.20.10` and, if it
   fails, runs the idempotent on-VM helper `/usr/local/bin/onprem-clab-up.sh` to rebuild both. If you
@@ -47,8 +52,12 @@ minutes instead of hours.
   ip route replace 172.31.20.0/24 via 172.31.11.2 dev clabr1host
   # verify: ping -c3 172.31.20.10  → 0% loss
   ```
-- ✅ **No stuck/stale incidents.** Step 1 (`clear-incidents.ps1 -Force`) deletes prior incidents so
-  the new alert opens a *fresh* one. Pre-check with `.\scripts\clear-incidents.ps1 -ListOnly`.
+- ✅ **No stuck/stale incidents.** Step 0 runs `clear-incidents.ps1 -Force`, deleting prior
+  incidents (including ones left `Acknowledged`/`Resolved` from earlier runs) so the new alert opens
+  a *fresh* investigation. Pre-check with `.\scripts\clear-incidents.ps1 -ListOnly`.
+- ✅ **Baseline Connection Monitors green.** After starting VMs, Step 0 polls Log Analytics until
+  the scenario's CMs report `Pass` (up to `-BaselineTimeoutMinutes`, default 15) — so you inject
+  into a *known-healthy* environment and the only red is the one you cause.
 - ⚠️ **Agent in Autonomous mode** so it *acts* on-camera, not just proposes. Verify on a
   **freshly loaded** portal page (the toggle has a propagation lag — see the
   [mapping-limitations doc](./sre-agent-incident-mapping-limitations.md#5-ui-autonomy-toggle-has-a-propagation-lag)).
@@ -58,9 +67,6 @@ minutes instead of hours.
   5, 6, 20). Step 0 assumes the lab already exists — it starts/repairs, it does not deploy.
 - ⚠️ **Knowledge & response plans applied**: `.\scripts\configure-sre-agent.ps1` (readiness report
   all green). This is what lets the agent use the on-prem triage skill and knowledge.
-- ⚠️ **No stuck Fired alerts.** A clab alert left in `Fired`/`Acknowledged` will *mask* the new
-  firing. Step 0's fabric repair + Step 1's incident clear usually resolve this, but if an alert is
-  wedged, wait for the CM to go green and the alert to auto-**Resolve** before injecting.
 
 ### Screen layout for the recording
 - **Left / terminal:** `scripts/demo.ps1` (drives the demo and live-tails the investigation).
@@ -81,29 +87,45 @@ minutes instead of hours.
 ```
 
 `-Interactive` pauses before each phase so you can narrate; drop it for an unattended
-rehearsal. Useful switches: `-PreflightOnly` (run Step 0 and stop — warm/verify the lab),
-`-SkipPreflight` (skip Step 0 on an already-warm lab), `-TimeoutMinutes 30` (how long to watch),
-`-NoRevert` (leave the fault in for a follow-up shot), `-SkipClear`, `-NoWatch`,
-`-FaultName <any inject-fault scenario>`.
+rehearsal. Useful switches: `-Timeline` (timestamp every action **and** watch for each cascade
+event — see §3), `-PreflightOnly` (run pre-flight and stop — warm/verify the lab),
+`-TimeoutMinutes 30` (how long to watch), `-BaselineTimeoutMinutes 15` (how long pre-flight waits
+for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-NoWatch`,
+`-FaultName <any inject-fault scenario>`. Pre-flight always runs — there is no skip switch.
 
 ### What each phase does (and what to say)
 
 | Phase | Script action | Talk track |
 |-------|---------------|------------|
-| **0 · Pre-flight** | `az account show`; start deallocated source VMs; (clab) probe `172.31.20.10` and rebuild fabric+wiring via `onprem-clab-up.sh` if broken | *"First the script makes sure the lab is actually up — it starts any deallocated VMs and repairs the on-prem fabric — so the only thing that breaks the environment is the fault I inject next, not a cold VM."* |
-| **1 · Clear** | `clear-incidents.ps1 -Force` | *"Now I delete old incidents. The agent dedups per alert-rule over a 7-day window, so a stale incident would absorb this new alert instead of opening a clean investigation."* |
-| **2 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
-| **3 · Watch** | `watch-incidents.ps1` live-tail | *"Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident. Watch it build a plan, pull telemetry, run diagnostics, and reason toward the root cause."* |
-| **4 · Revert** | `inject-fault.ps1 … -Revert` | *"Finally I restore the environment for the next take."* (Skip with `-NoRevert` if the agent already remediated it and you want to show the healthy state.) |
+| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until the scenario's CMs report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
+| **1 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
+| **2 · Watch** | `watch-incidents.ps1` live-tail (with `-Timeline`, a cascade watcher runs first) | *"Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident. Watch it build a plan, pull telemetry, run diagnostics, and reason toward the root cause."* |
+| **3 · Revert** | `inject-fault.ps1 … -Revert` | *"Finally I restore the environment for the next take."* (Skip with `-NoRevert` if the agent already remediated it and you want to show the healthy state.) |
 
 ---
 
-## 3. Timing expectations (so the video doesn't feel stuck)
+## 3. Timing expectations & `-Timeline` mode
+
+Run a rehearsal with **`-Timeline`** to timestamp every action and actively watch for each event
+in the cascade — the script records the *true* time of each and prints a summary table at the end:
+
+```powershell
+.\scripts\demo.ps1 -Scenario clab -Timeline      # unattended rehearsal with timings
+```
+
+It watches (and stamps `⏱ …Z (T+mm:ss)` as each occurs): baseline CMs green, **fault injected
+(T0)**, Connection Monitor goes **red** (Log Analytics `NWConnectionMonitorTestResult`), **syslog**
+BGP/OSPF message arrives (clab only, best-effort — the FRR→host forwarder may not always deliver),
+the **metric alert fires** (`Microsoft.AlertsManagement/alerts`), the **SRE Agent opens the
+incident** (threads API), and — after remediation — the **CM recovers green**. Then it hands off to
+`watch-incidents.ps1` to stream the agent's investigation.
+
+Typical latencies after inject (use these to plan cuts):
 
 | Milestone | Typical latency after inject |
 |-----------|------------------------------|
 | Connection Monitor test starts failing | ~1–3 min |
-| Metric alert fires (sustained breach) | ~3–7 min |
+| Metric alert fires (sustained breach; `PT5M`/`PT5M`) | ~3–7 min |
 | Agent scanner opens the incident (1-min poll) | ~+1 min after the alert |
 | Agent reaches a root-cause verdict | ~5–20 min of investigation |
 
@@ -116,9 +138,10 @@ rehearsal. Useful switches: `-PreflightOnly` (run Step 0 and stop — warm/verif
 
 ## 4. Reset & rollback
 
-- The demo **auto-reverts** the fault in phase 4. To leave it injected, pass `-NoRevert`; then
-  revert manually: `.\scripts\inject-fault.ps1 -Scenario <fault> -Revert`.
-- Clear the demo incident afterwards: `.\scripts\clear-incidents.ps1 -Force`.
+- The demo **auto-reverts** the fault in the revert phase. To leave it injected, pass `-NoRevert`;
+  then revert manually: `.\scripts\inject-fault.ps1 -Scenario <fault> -Revert`.
+- Clear the demo incident afterwards: `.\scripts\clear-incidents.ps1 -Force` (or just let the next
+  run's pre-flight do it).
 - Re-verify health: `.\scripts\check-health.ps1` (and, for clab, the OSPF/BGP recovery).
 
 ---

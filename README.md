@@ -316,12 +316,15 @@ watch → revert):
 .\scripts\demo.ps1 -Scenario azure -Interactive   # Azure UDR next-hop black-hole
 ```
 
-It first runs a **pre-flight** (Step 0): verifies `az login`, starts the scenario's
-Connection-Monitor source VMs if they are deallocated, and for the clab take rebuilds the
-containerlab fabric + host-probe wiring — so a clean baseline exists before the fault. Then it
-clears stale incidents, injects a curated fault, live-tails the incident thread
-(`watch-incidents.ps1` prints each agent step and the tools it uses), then reverts. To just warm
-and verify the lab without injecting, run `.\scripts\demo.ps1 -Scenario clab -PreflightOnly`.
+It first runs a **mandatory pre-flight** (Step 0) that makes the lab clean: verifies `az login`,
+**starts every deallocated VM** (so all Connection Monitors can go green — a down source *or*
+destination VM fires unrelated alerts), rebuilds the containerlab fabric + host-probe wiring for the
+clab take, **deletes any existing incidents**, and **waits until the scenario's Connection Monitors
+report green**. Then it injects a curated fault, live-tails the incident thread
+(`watch-incidents.ps1` prints each agent step and the tools it uses), and reverts. Add `-Timeline`
+to timestamp every action and watch the whole cascade (CM red → syslog → alert fired → incident
+opened → recovery) with a summary table — handy for rehearsals. To just warm and verify the lab
+without injecting, run `.\scripts\demo.ps1 -Scenario clab -PreflightOnly`.
 Full talk track, shot list, timing, and troubleshooting: **[docs/demo-runbook.md](docs/demo-runbook.md)**.
 
 ### Available Scenarios (33 total)
