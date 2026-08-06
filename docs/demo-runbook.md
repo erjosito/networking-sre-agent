@@ -105,8 +105,8 @@ for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-N
 |-------|---------------|------------|
 | **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; start any stopped **App Gateways** (they front the webapp Traffic Manager); (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until **all** Connection Monitors report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
 | **1 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
-| **2 · Watch** | `watch-incidents.ps1` live-tail (with `-Timeline`, a cascade watcher runs first) | *"Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident. Watch it build a plan, pull telemetry, run diagnostics, and reason toward the root cause."* |
-| **3 · Revert** | `inject-fault.ps1 … -Revert` | *"Finally I restore the environment for the next take."* (Skip with `-NoRevert` if the agent already remediated it and you want to show the healthy state.) |
+| **2 · Watch** | `watch-incidents.ps1 -Quiet` — follows the investigation silently and prints only the **final message(s)** when the agent finishes, the incident resolves, or activity **stalls** for 3 min (with `-Timeline`, a cascade watcher runs first) | *"Rather than scroll every message, I let it work and show the conclusion. Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident — then it builds a plan, pulls telemetry, runs diagnostics, and reasons to the root cause."* |
+| **3 · Revert** | First checks whether the **agent already remediated** the fault (scenario Connection Monitor GREEN again). If so it says so and skips the manual revert (non-interactive) or asks whether to revert anyway (`-Interactive`); otherwise `inject-fault.ps1 … -Revert` | *"The script verifies whether the agent fixed it on its own before I touch anything — if connectivity is already restored there's nothing to revert; otherwise it restores the environment for the next take."* (`-NoRevert` leaves it as-is.) |
 
 ---
 
@@ -126,7 +126,9 @@ the **metric alert fires** (`Microsoft.AlertsManagement/alerts`), the **SRE Agen
 incident** (threads API), and — after remediation — the **CM recovers green**. While waiting for
 these it prints a `T+mm:ss` heartbeat listing which prerequisite events are still pending (e.g.
 `waiting for: alert, incident`) so you can see the alert-before-incident gap in real time. Then it
-hands off to `watch-incidents.ps1` to stream the agent's investigation.
+follows the agent's investigation **quietly** (`watch-incidents.ps1 -Quiet`) and prints only the
+final message(s) once the agent finishes, the incident resolves, or activity stalls — keeping the
+screen calm on camera instead of scrolling every message.
 
 Typical latencies after inject (use these to plan cuts):
 

@@ -32,9 +32,21 @@
 .PARAMETER MaxChars
     Truncate each printed message body to this many characters (default 700).
 
+.PARAMETER Quiet
+    Do not stream every message. Follow the investigation silently and print only
+    the last -TailMessages message(s) once the agent finishes, the incident
+    resolves, activity stalls, or the timeout is hit. Ideal for on-camera demos.
+
+.PARAMETER TailMessages
+    In -Quiet mode, how many trailing messages to show at the end (default 2).
+
+.PARAMETER StallMinutes
+    In -Quiet mode, treat the investigation as "stuck" (and show the tail) after
+    this many minutes with no new messages (default 3).
+
 .EXAMPLE
     .\watch-incidents.ps1 -TitleContains clab
-    .\watch-incidents.ps1 -ThreadId 5a456a03-... -TimeoutMinutes 45
+    .\watch-incidents.ps1 -ThreadId 5a456a03-... -Quiet -TailMessages 2
 #>
 
 [CmdletBinding()]
@@ -47,7 +59,10 @@ param(
     [datetime]$SinceUtc     = [datetime]::UtcNow,
     [int]$TimeoutMinutes    = 30,
     [int]$PollSeconds       = 15,
-    [int]$MaxChars          = 700
+    [int]$MaxChars          = 700,
+    [switch]$Quiet,
+    [int]$TailMessages      = 2,
+    [int]$StallMinutes      = 3
 )
 
 $ErrorActionPreference = "Stop"
@@ -109,6 +124,35 @@ function Format-Body {
     return $t
 }
 
+# Pretty-print a single incident message (role header, tool tags, body).
+function Print-Message {
+    param($m)
+    $role = $m.author.role
+    $ts   = if ($m.timeStamp) { ([datetime]$m.timeStamp).ToLocalTime().ToString('HH:mm:ss') } else { '--:--:--' }
+    $color = switch ($role) { 'SREAgent' { 'Green' } 'User' { 'Gray' } default { 'White' } }
+    Write-Host ("┌─ [{0}] {1}" -f $ts, $role) -ForegroundColor $color
+    $tags = @()
+    if ($m.azCliExecution)     { $tags += 'az CLI' }
+    if ($m.terminalResult)     { $tags += 'terminal' }
+    if ($m.pythonExecutionResult) { $tags += 'python' }
+    if ($m.knowledgeGraphSearchResult) { $tags += 'knowledge-graph' }
+    if ($m.memorySearchResult) { $tags += 'knowledge/memory' }
+    if ($m.grepSearchResult -or $m.readFileResult) { $tags += 'files/skills' }
+    if ($m.todoInfo)           { $tags += 'plan/todos' }
+    if ($tags.Count) { Write-Host ("│  ⚙ used: {0}" -f ($tags -join ', ')) -ForegroundColor DarkCyan }
+    $body = Format-Body $m.text
+    if ($body) { Write-Host ("│  {0}" -f $body) -ForegroundColor $color }
+    Write-Host "└─" -ForegroundColor $color
+    Write-Host ""
+}
+
+# Completion heuristic: the agent posts a "Session Insights" trajectory summary
+# or a "Root Cause" heading when it wraps up an investigation.
+function Test-DoneMessage {
+    param($m)
+    return ($m.text -and ($m.text -match '(?i)Session Insights' -or $m.text -match '(?i)^#+\s*Root Cause'))
+}
+
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 
 Write-Host "=========================================" -ForegroundColor Cyan
@@ -152,59 +196,72 @@ if (-not $ThreadId) {
     }
 }
 
-# ── Phase 2: stream messages until the investigation wraps up ────────────────
-Write-Info "Streaming investigation messages (Ctrl+C to stop)…"
+# ── Phase 2: follow the investigation until it wraps up, stalls, or times out ─
+if ($Quiet) {
+    Write-Info "Following the investigation quietly — will show the final message(s) when the agent finishes or stalls (no new activity for $StallMinutes min)…"
+} else {
+    Write-Info "Streaming investigation messages (Ctrl+C to stop)…"
+}
 Write-Host ""
 $printed = 0
 $done = $false
+$doneReason = "timeout"
+$allMsgs = @()
+$lastCount = 0
+$lastChangeAt = Get-Date
 while (-not $done) {
-    if ((Get-Date) -gt $deadline) { Write-Warn "Watch timeout reached ($TimeoutMinutes min)."; break }
+    if ((Get-Date) -gt $deadline) { $doneReason = "timeout"; if (-not $Quiet) { Write-Warn "Watch timeout reached ($TimeoutMinutes min)." }; break }
 
     try {
         $msgs = (Invoke-Api "/api/v1/threads/$ThreadId/messages").value
     } catch { Write-Warn "messages poll failed: $($_.Exception.Message)"; Start-Sleep $PollSeconds; continue }
+    $allMsgs = @($msgs)
+
+    # Track activity for stall detection.
+    if ($msgs.Count -ne $lastCount) { $lastCount = $msgs.Count; $lastChangeAt = Get-Date }
 
     if ($msgs.Count -gt $printed) {
         foreach ($m in $msgs[$printed..($msgs.Count - 1)]) {
-            $role = $m.author.role
-            $ts   = if ($m.timeStamp) { ([datetime]$m.timeStamp).ToLocalTime().ToString('HH:mm:ss') } else { '--:--:--' }
-            $color = switch ($role) { 'SREAgent' { 'Green' } 'User' { 'Gray' } default { 'White' } }
-            Write-Host ("┌─ [{0}] {1}" -f $ts, $role) -ForegroundColor $color
-
-            # Surface tool/command activity explicitly (great on camera).
-            $tags = @()
-            if ($m.azCliExecution)     { $tags += 'az CLI' }
-            if ($m.terminalResult)     { $tags += 'terminal' }
-            if ($m.pythonExecutionResult) { $tags += 'python' }
-            if ($m.knowledgeGraphSearchResult) { $tags += 'knowledge-graph' }
-            if ($m.memorySearchResult) { $tags += 'knowledge/memory' }
-            if ($m.grepSearchResult -or $m.readFileResult) { $tags += 'files/skills' }
-            if ($m.todoInfo)           { $tags += 'plan/todos' }
-            if ($tags.Count) { Write-Host ("│  ⚙ used: {0}" -f ($tags -join ', ')) -ForegroundColor DarkCyan }
-
-            $body = Format-Body $m.text
-            if ($body) { Write-Host ("│  {0}" -f $body) -ForegroundColor $color }
-            Write-Host "└─" -ForegroundColor $color
-            Write-Host ""
-
-            # Completion heuristics: the agent posts a "Session Insights" trajectory
-            # summary when it wraps, or the incident flips to resolved.
-            if ($m.text -and ($m.text -match '(?i)Session Insights' -or $m.text -match '(?i)^#+\s*Root Cause')) {
-                $done = $true
-            }
+            if (-not $Quiet) { Print-Message $m }
+            if (Test-DoneMessage $m) { $done = $true; $doneReason = "completed" }
         }
         $printed = $msgs.Count
     }
 
     if (-not $done) {
-        # Also stop if the incident status itself flips to resolved.
+        # Stop if the incident status itself flips to resolved.
         try {
             $st = (Invoke-Api "/api/v1/threads/$ThreadId").status.incidentStatus.status
-            if ($st -eq 'resolved') { Write-Ok "Incident status → resolved."; $done = $true }
+            if ($st -eq 'resolved') { $done = $true; $doneReason = "resolved"; if (-not $Quiet) { Write-Ok "Incident status → resolved." } }
         } catch { }
     }
+
+    # Quiet mode: treat a lull with no new messages as "stuck" so we don't hang.
+    if (-not $done -and $Quiet -and ((Get-Date) - $lastChangeAt).TotalMinutes -ge $StallMinutes) {
+        $done = $true; $doneReason = "stalled"
+    }
+
     if (-not $done) { Start-Sleep $PollSeconds }
+}
+
+# Quiet mode prints only the tail once the loop ends.
+if ($Quiet) {
+    switch ($doneReason) {
+        "completed" { Write-Ok  "Agent finished the investigation. Last $TailMessages message(s):" }
+        "resolved"  { Write-Ok  "Incident resolved. Last $TailMessages message(s):" }
+        "stalled"   { Write-Warn "No new agent activity for $StallMinutes min — showing the last $TailMessages message(s) (may be stuck / awaiting input):" }
+        default     { Write-Warn "Watch timed out after $TimeoutMinutes min — showing the last $TailMessages message(s):" }
+    }
+    Write-Host ""
+    if ($allMsgs.Count) {
+        $start = [Math]::Max(0, $allMsgs.Count - $TailMessages)
+        foreach ($m in $allMsgs[$start..($allMsgs.Count - 1)]) { Print-Message $m }
+    } else {
+        Write-Warn "No messages retrieved for this thread."
+    }
 }
 
 Write-Host ""
 Write-Ok "Watch complete. Full detail: portal → SRE Agent → incident thread $ThreadId"
+# Emit the terminal reason so callers (e.g. demo.ps1) can react.
+Write-Output "WATCH_RESULT=$doneReason"

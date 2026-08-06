@@ -108,6 +108,7 @@ function Pause-Step { param([string]$Next)
 # ── Timeline recorder ────────────────────────────────────────────────────────
 $script:Events = New-Object System.Collections.Generic.List[object]
 $script:T0 = $null   # set at fault injection; deltas are measured from here
+$script:AgentReverted = $false   # set true if the SRE Agent restores connectivity on its own
 
 function Record-Event {
     param([string]$Label, [datetime]$When = [datetime]::UtcNow, [string]$Detail = "")
@@ -482,39 +483,66 @@ if (-not $NoWatch) {
 
         if ($incident) {
             $remaining = [Math]::Max(2, [int]($deadline - (Get-Date)).TotalMinutes)
-            & "$here\watch-incidents.ps1" -ThreadId $incident.id -TimeoutMinutes $remaining
-            Record-Event "Investigation stream ended"
+            & "$here\watch-incidents.ps1" -ThreadId $incident.id -TimeoutMinutes $remaining -Quiet -TailMessages 2 -StallMinutes 3 | Out-Null
+            Record-Event "Investigation ended (final messages shown)"
             # Best-effort recovery capture (autonomous remediation closing the loop).
-            Write-Info "Watching for recovery (CM green again / alert resolved) for up to 5 min..."
+            Write-Info "Checking whether the agent restored connectivity (CM green again) for up to 5 min..."
             $recDeadline = (Get-Date).AddMinutes(5)
-            $recGreen = $false
-            while (-not $recGreen -and (Get-Date) -lt $recDeadline) {
+            while (-not $script:AgentReverted -and (Get-Date) -lt $recDeadline) {
                 $r = @(Get-CmResults -SourceName $meta.CmSource -Mins 10)
                 if ($r.Count -gt 0 -and @($r | Where-Object { $_.TestResult -ne 'Pass' }).Count -eq 0) {
-                    $recGreen = $true; Record-Event "Connection Monitor recovered GREEN"
+                    $script:AgentReverted = $true; Record-Event "Connection Monitor recovered GREEN"
                 }
-                if (-not $recGreen) { Start-Sleep 30 }
+                if (-not $script:AgentReverted) { Start-Sleep 30 }
             }
         } else {
             Write-Warn "No incident detected within $TimeoutMinutes min. Check the alert fired and the agent scanner."
         }
     } else {
-        & "$here\watch-incidents.ps1" -TitleContains $titleFilter -SinceUtc $injectUtc -TimeoutMinutes $TimeoutMinutes
+        & "$here\watch-incidents.ps1" -TitleContains $titleFilter -SinceUtc $injectUtc -TimeoutMinutes $TimeoutMinutes -Quiet -TailMessages 2 -StallMinutes 3 | Out-Null
     }
 } else {
     Write-Warn "NoWatch set — skipping the live investigation stream."
 }
 
 # ── 3. Revert ───────────────────────────────────────────────────────────────
-if (-not $NoRevert) {
-    Pause-Step "REVERT the fault"
+# Before touching anything, verify whether the SRE Agent already remediated the
+# fault on its own — the scenario's Connection Monitor being GREEN again is the
+# observable signal. If so, there is nothing to revert (a manual revert would be
+# a no-op) and we tell the user rather than blindly re-applying.
+if (-not $script:AgentReverted) {
+    $rr = @(Get-CmResults -SourceName $meta.CmSource -Mins 10)
+    if ($rr.Count -gt 0 -and @($rr | Where-Object { $_.TestResult -ne 'Pass' }).Count -eq 0) { $script:AgentReverted = $true }
+}
+
+if ($NoRevert) {
+    Write-Warn "NoRevert set — fault '$fault' will NOT be reverted by this script."
+    if ($script:AgentReverted) { Write-Ok "Note: the SRE Agent already restored connectivity (CM green)." }
+    else { Write-Host "    .\scripts\inject-fault.ps1 -Scenario $fault -Revert" -ForegroundColor Yellow }
+}
+elseif ($script:AgentReverted) {
+    Banner "STEP 3 — Revert"
+    Write-Ok "The SRE Agent appears to have ALREADY remediated the fault — '$($meta.CmSource)' Connection Monitor is GREEN again."
+    $doRevert = $false
+    if ($Interactive) {
+        $ans = Read-Host "Agent already fixed it. Run the manual revert anyway to guarantee a clean baseline? (y/N)"
+        $doRevert = ($ans -match '^(y|yes)$')
+    } else {
+        Write-Info "Skipping manual revert — the environment is already clean. (Run with -Interactive to override.)"
+    }
+    if ($doRevert) {
+        & "$here\inject-fault.ps1" -Scenario $fault -ResourceGroup $ResourceGroup -Prefix $Prefix -Revert
+        Record-Event "Fault reverted (manual, after agent fix)"
+        Write-Ok "Fault reverted — environment restored."
+    }
+}
+else {
+    Pause-Step "REVERT the fault (agent did NOT restore it — CM still red)"
     Banner "STEP 3 — Revert fault: $fault"
+    Write-Info "The SRE Agent did not restore connectivity on its own; reverting the injected fault."
     & "$here\inject-fault.ps1" -Scenario $fault -ResourceGroup $ResourceGroup -Prefix $Prefix -Revert
     Record-Event "Fault reverted"
     Write-Ok "Fault reverted — environment restored."
-} else {
-    Write-Warn "NoRevert set — fault '$fault' is STILL INJECTED. Revert with:"
-    Write-Host "    .\scripts\inject-fault.ps1 -Scenario $fault -Revert" -ForegroundColor Yellow
 }
 
 Show-Timeline
