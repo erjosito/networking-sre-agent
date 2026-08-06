@@ -60,9 +60,10 @@ minutes instead of hours.
 - ✅ **No stuck/stale incidents.** Step 0 runs `clear-incidents.ps1 -Force`, deleting prior
   incidents (including ones left `Acknowledged`/`Resolved` from earlier runs) so the new alert opens
   a *fresh* investigation. Pre-check with `.\scripts\clear-incidents.ps1 -ListOnly`.
-- ✅ **Baseline Connection Monitors green.** After starting VMs, Step 0 polls Log Analytics until
-  the scenario's CMs report `Pass` (up to `-BaselineTimeoutMinutes`, default 15) — so you inject
-  into a *known-healthy* environment and the only red is the one you cause.
+- ✅ **Baseline Connection Monitors green.** After starting VMs and App Gateways, Step 0 polls Log
+  Analytics until **every** Connection Monitor in the environment reports `Pass` (not just the
+  scenario's source — up to `-BaselineTimeoutMinutes`, default 15) — so you inject into a
+  *known-healthy* environment and the only red is the one you cause.
 - ⚠️ **Agent in Autonomous mode** so it *acts* on-camera, not just proposes. Verify on a
   **freshly loaded** portal page (the toggle has a propagation lag — see the
   [mapping-limitations doc](./sre-agent-incident-mapping-limitations.md#5-ui-autonomy-toggle-has-a-propagation-lag)).
@@ -102,7 +103,7 @@ for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-N
 
 | Phase | Script action | Talk track |
 |-------|---------------|------------|
-| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; start any stopped **App Gateways** (they front the webapp Traffic Manager); (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until the scenario's CMs report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
+| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; start any stopped **App Gateways** (they front the webapp Traffic Manager); (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until **all** Connection Monitors report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
 | **1 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
 | **2 · Watch** | `watch-incidents.ps1` live-tail (with `-Timeline`, a cascade watcher runs first) | *"Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident. Watch it build a plan, pull telemetry, run diagnostics, and reason toward the root cause."* |
 | **3 · Revert** | `inject-fault.ps1 … -Revert` | *"Finally I restore the environment for the next take."* (Skip with `-NoRevert` if the agent already remediated it and you want to show the healthy state.) |
@@ -122,8 +123,10 @@ It watches (and stamps `⏱ …Z (T+mm:ss)` as each occurs): baseline CMs green,
 (T0)**, Connection Monitor goes **red** (Log Analytics `NWConnectionMonitorTestResult`), **syslog**
 BGP/OSPF message arrives (clab only, best-effort — the FRR→host forwarder may not always deliver),
 the **metric alert fires** (`Microsoft.AlertsManagement/alerts`), the **SRE Agent opens the
-incident** (threads API), and — after remediation — the **CM recovers green**. Then it hands off to
-`watch-incidents.ps1` to stream the agent's investigation.
+incident** (threads API), and — after remediation — the **CM recovers green**. While waiting for
+these it prints a `T+mm:ss` heartbeat listing which prerequisite events are still pending (e.g.
+`waiting for: alert, incident`) so you can see the alert-before-incident gap in real time. Then it
+hands off to `watch-incidents.ps1` to stream the agent's investigation.
 
 Typical latencies after inject (use these to plan cuts):
 

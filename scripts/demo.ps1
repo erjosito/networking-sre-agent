@@ -178,7 +178,17 @@ function Get-CmResults {
     } catch { return @() }
 }
 
-# First fired Azure Monitor alert whose rule name starts with $NameLike, after $SinceUtc.
+# Latest Connection Monitor test result rows for EVERY source in the environment.
+function Get-AllCmResults {
+    param([int]$Mins = 20)
+    $law = Get-LawId
+    if (-not $law) { return @() }
+    $kql = "NWConnectionMonitorTestResult | where TimeGenerated > ago(${Mins}m) | summarize arg_max(TimeGenerated, *) by SourceName, DestinationName, TestGroupName | project SourceName, DestinationName, TestGroupName, TestResult, TimeGenerated | order by SourceName asc, TestGroupName asc"
+    try {
+        $out = az monitor log-analytics query --workspace $law --analytics-query $kql -o json 2>$null | ConvertFrom-Json
+        return @($out)
+    } catch { return @() }
+}
 function Get-FiredAlert {
     param([string]$NameLike, [datetime]$SinceUtc)
     $sub = Get-SubId
@@ -337,28 +347,28 @@ function Ensure-ClabFabric {
     else { Write-Warn "clab host→LAN still failing after rebuild — investigate before recording." }
 }
 
-# Poll the scenario's Connection Monitors until every latest result is Pass.
-function Wait-CmGreen {
-    param([string]$SourceName, [int]$TimeoutMin = 15)
-    Write-Info "Waiting for baseline Connection Monitors to go GREEN (source $SourceName, up to $TimeoutMin min)..."
+# Poll EVERY Connection Monitor in the environment until all latest results are Pass.
+function Wait-AllCmGreen {
+    param([int]$TimeoutMin = 15)
+    Write-Info "Waiting for ALL Connection Monitors in the environment to go GREEN (up to $TimeoutMin min)..."
     $deadline = (Get-Date).AddMinutes($TimeoutMin)
     while ((Get-Date) -lt $deadline) {
-        $r = @(Get-CmResults -SourceName $SourceName -Mins 15)
+        $r = @(Get-AllCmResults -Mins 20)
         if ($r.Count -gt 0) {
             $bad = @($r | Where-Object { $_.TestResult -ne 'Pass' })
             if ($bad.Count -eq 0) {
-                Write-Ok "Baseline GREEN — $($r.Count) test(s) passing for $SourceName."
-                Record-Event "Baseline Connection Monitors GREEN" -Detail "$($r.Count) tests"
+                Write-Ok "Baseline GREEN — all $($r.Count) Connection Monitor test(s) passing."
+                Record-Event "All Connection Monitors GREEN" -Detail "$($r.Count) tests"
                 return $true
             }
-            $summary = ($bad | ForEach-Object { "$($_.TestGroupName)=$($_.TestResult)" }) -join ', '
+            $summary = ($bad | ForEach-Object { "$($_.TestGroupName)[$($_.SourceName)->$($_.DestinationName)]=$($_.TestResult)" }) -join ', '
             Write-Info "  $($bad.Count)/$($r.Count) not yet Pass ($summary) — waiting..."
         } else {
-            Write-Info "  no recent CM data for $SourceName yet (agent re-reporting after boot) — waiting..."
+            Write-Info "  no recent CM data yet (agents re-reporting after boot) — waiting..."
         }
         Start-Sleep 30
     }
-    Write-Warn "Baseline not fully green for $SourceName within $TimeoutMin min — proceeding anyway."
+    Write-Warn "Not all Connection Monitors green within $TimeoutMin min — proceeding anyway (check the summary above)."
     return $false
 }
 
@@ -409,7 +419,7 @@ if ($Scenario -eq 'clab') { Ensure-ClabFabric }
 Write-Info "Deleting any existing SRE Agent incidents (so the fault opens a fresh one)..."
 & "$here\clear-incidents.ps1" -Force
 Record-Event "Existing incidents cleared"
-Wait-CmGreen -SourceName $meta.CmSource -TimeoutMin $BaselineTimeoutMinutes | Out-Null
+Wait-AllCmGreen -TimeoutMin $BaselineTimeoutMinutes | Out-Null
 Write-Info "Reminder: confirm the agent is in AUTONOMOUS mode on a freshly-loaded portal tab"
 Write-Info "(the toggle has a propagation lag) so it remediates on-camera instead of only proposing."
 Write-Ok "Pre-flight complete — clean baseline ready."
@@ -458,7 +468,16 @@ if (-not $NoWatch) {
             }
             $incident = Get-NewIncident -SinceUtc $injectUtc -TitleContains $titleFilter
             if ($incident) { Record-Event "SRE Agent incident CREATED" ([datetime]$incident.createdTimestamp) -Detail $incident.title }
-            if (-not $incident) { Start-Sleep 20 }
+            if (-not $incident) {
+                $elapsed = ((Get-Date).ToUniversalTime() - $injectUtc)
+                $pend = @()
+                if (-not $seen.cmred) { $pend += 'CM-red' }
+                if ($meta.Syslog.Count -and -not $seen.syslog) { $pend += 'syslog' }
+                if (-not $seen.alert) { $pend += 'alert' }
+                $pend += 'incident'
+                Write-Info ("  T+{0:mm\:ss} — waiting for: {1}" -f $elapsed, ($pend -join ', '))
+                Start-Sleep 20
+            }
         }
 
         if ($incident) {
