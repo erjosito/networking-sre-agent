@@ -285,6 +285,37 @@ function Ensure-AllVmsRunning {
     Record-Event "All lab VMs running" -Detail "$($toStart.Count) started"
 }
 
+# App Gateways front the webapp Traffic Manager profile. When they are Stopped the
+# TM endpoints go Degraded and the onprem-to-webapp Connection Monitor fails (rtt=None),
+# so the baseline is never fully green. Start any stopped App Gateways and wait for them.
+function Ensure-AppGatewaysRunning {
+    Write-Info "Enumerating Application Gateways in $ResourceGroup..."
+    $gws = az network application-gateway list -g $ResourceGroup -o json 2>$null | ConvertFrom-Json
+    if (-not $gws) { Write-Info "No Application Gateways in $ResourceGroup."; return }
+    $toStart = @()
+    foreach ($g in $gws) {
+        $st = az network application-gateway show -g $ResourceGroup -n $g.name --query "operationalState" -o tsv 2>$null
+        if ($st -eq 'Running') { Write-Ok "$($g.name): running" }
+        else { Write-Info "$($g.name): $st — starting..."; az network application-gateway start -g $ResourceGroup -n $g.name --no-wait -o none; $toStart += $g.name }
+    }
+    if ($toStart.Count -eq 0) { Write-Ok "All Application Gateways already running."; return }
+    Write-Info "Waiting for $($toStart.Count) App Gateway(s) to reach 'Running' (can take a few minutes)..."
+    $deadline = (Get-Date).AddMinutes(8)
+    $pending = $toStart
+    do {
+        Start-Sleep 20
+        $pending = @()
+        foreach ($n in $toStart) {
+            $st = az network application-gateway show -g $ResourceGroup -n $n --query "operationalState" -o tsv 2>$null
+            if ($st -ne 'Running') { $pending += $n }
+        }
+        if ($pending.Count) { Write-Info "  still starting: $($pending -join ', ')" }
+    } while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline)
+    if ($pending.Count -eq 0) { Write-Ok "All $($toStart.Count) App Gateway(s) running." }
+    else { Write-Warn "Not running after wait: $($pending -join ', ') — onprem-to-webapp CM may stay red (TM endpoints Degraded)." }
+    Record-Event "App Gateways running" -Detail "$($toStart.Count) started"
+}
+
 # The clab host-probe wiring (veth clabr1host) and FRR container fabric are NOT
 # durable across a VM stop/start. Rebuild them idempotently via the on-VM helper
 # only if the fast host→LAN probe is broken (don't rebuild a healthy fabric).
@@ -373,6 +404,7 @@ Pause-Step "run PRE-FLIGHT (start all VMs, clear incidents, wait for CMs green)"
 Banner "STEP 0 — Pre-flight: make the lab clean before the fault"
 Assert-AzLogin
 Ensure-AllVmsRunning
+Ensure-AppGatewaysRunning
 if ($Scenario -eq 'clab') { Ensure-ClabFabric }
 Write-Info "Deleting any existing SRE Agent incidents (so the fault opens a fresh one)..."
 & "$here\clear-incidents.ps1" -Force

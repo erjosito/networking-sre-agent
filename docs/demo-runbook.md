@@ -42,6 +42,11 @@ minutes instead of hours.
   a CM **source or destination** — fails its Connection Monitor and fires alerts (and opens
   incidents) that have nothing to do with the demo. Starting only the scenario's source VM is not
   enough; the whole lab must be up for a clean green baseline.
+- ✅ **App Gateways started.** Step 0 enumerates the Application Gateways and starts any that are
+  `Stopped`. Both hub App Gateways front the `netsre-webapp` Traffic Manager profile — when they are
+  stopped the TM endpoints go **Degraded** and the `onprem-to-webapp` Connection Monitor fails
+  (`rtt=None`), so the baseline is never fully green until they are `Running` again. (App Gateways
+  are stopped to save cost between demos; starting one takes a few minutes.)
 - ✅ **clab fabric + host-probe wiring.** The `clabr1host` veth IP and LAN route (and the FRR
   container fabric) are not durable across a VM stop/start; Step 0 probes `172.31.20.10` and, if it
   fails, runs the idempotent on-VM helper `/usr/local/bin/onprem-clab-up.sh` to rebuild both. If you
@@ -97,7 +102,7 @@ for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-N
 
 | Phase | Script action | Talk track |
 |-------|---------------|------------|
-| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until the scenario's CMs report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
+| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; start any stopped **App Gateways** (they front the webapp Traffic Manager); (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until the scenario's CMs report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
 | **1 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
 | **2 · Watch** | `watch-incidents.ps1` live-tail (with `-Timeline`, a cascade watcher runs first) | *"Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident. Watch it build a plan, pull telemetry, run diagnostics, and reason toward the root cause."* |
 | **3 · Revert** | `inject-fault.ps1 … -Revert` | *"Finally I restore the environment for the next take."* (Skip with `-NoRevert` if the agent already remediated it and you want to show the healthy state.) |
