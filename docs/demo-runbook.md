@@ -47,15 +47,19 @@ minutes instead of hours.
   stopped the TM endpoints go **Degraded** and the `onprem-to-webapp` Connection Monitor fails
   (`rtt=None`), so the baseline is never fully green until they are `Running` again. (App Gateways
   are stopped to save cost between demos; starting one takes a few minutes.)
-- ✅ **clab fabric + host-probe wiring.** The `clabr1host` veth IP and LAN route (and the FRR
-  container fabric) are not durable across a VM stop/start; Step 0 probes `172.31.20.10` and, if it
-  fails, runs the idempotent on-VM helper `/usr/local/bin/onprem-clab-up.sh` to rebuild both. If you
-  ever need to do it by hand:
+- ✅ **clab fabric + host-probe wiring.** The `clabr1host` veth IP and the host route
+  `172.31.20.0/24 via 172.31.11.2` are **not** durable across a VM reboot *or* a `containerlab
+  deploy --reconfigure` (which recreates the veth without its IP). When they are missing, a **stale
+  route sends the probe over the docker management bridge** (`172.31.20.0/24 via 172.20.20.x`)
+  straight to the in-fabric host container — so `ping 172.31.20.10` still succeeds but **bypasses the
+  r1→r2 fabric**, and no OSPF/BGP fault can ever turn the Connection Monitor red. Step 0 therefore
+  **re-applies the wiring idempotently and verifies the probe egresses `clabr1host`** (the fabric),
+  not the mgmt bridge — a passing ping alone is not trusted. If you ever need to do it by hand:
   ```bash
   ip addr replace 172.31.11.1/30 dev clabr1host
   ip link set dev clabr1host up
   ip route replace 172.31.20.0/24 via 172.31.11.2 dev clabr1host
-  # verify: ping -c3 172.31.20.10  → 0% loss
+  # verify the path (NOT just reachability): ip route get 172.31.20.10  → must show 'dev clabr1host'
   ```
 - ✅ **No stuck/stale incidents.** Step 0 runs `clear-incidents.ps1 -Force`, deleting prior
   incidents (including ones left `Acknowledged`/`Resolved` from earlier runs) so the new alert opens

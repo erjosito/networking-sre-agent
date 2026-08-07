@@ -356,25 +356,63 @@ function Ensure-AppGatewaysRunning {
     Record-Event "App Gateways running" -Detail "$($toStart.Count) started"
 }
 
-# The clab host-probe wiring (veth clabr1host) and FRR container fabric are NOT
-# durable across a VM stop/start. Rebuild them idempotently via the on-VM helper
-# only if the fast host→LAN probe is broken (don't rebuild a healthy fabric).
+# The clab host-probe wiring (veth clabr1host IP + host route) is NOT durable across
+# a VM reboot OR a `containerlab deploy --reconfigure` (which recreates the veth
+# without its IP). When the wiring is missing, a STALE route sends the probe over the
+# docker management bridge (172.20.20.0/24) straight to the in-fabric host container —
+# so `ping 172.31.20.10` still succeeds but BYPASSES the r1→r2 fabric, and no fabric
+# fault (OSPF/BGP) can ever turn the Connection Monitor red. We therefore (1) re-apply
+# the cloud-init wiring idempotently and (2) VERIFY the probe egresses `clabr1host`
+# (the fabric), not the mgmt bridge — pinging alone is not sufficient.
 function Ensure-ClabFabric {
     $ClabVm = "$Prefix-onprem-clab"
-    Write-Info "Checking clab host-probe path ($ClabVm host → in-fabric LAN 172.31.20.10)..."
-    $probe = az vm run-command invoke -g $ResourceGroup -n $ClabVm --command-id RunShellScript `
-        --scripts "ping -c3 -W2 172.31.20.10 2>&1 | tail -3" -o json 2>$null | ConvertFrom-Json
-    $msg = if ($probe) { $probe.value[0].message } else { "" }
-    if ($msg -match '0% packet loss') { Write-Ok "clab fabric healthy — host→LAN 0% loss."; return }
-    Write-Warn "clab host→LAN probe not clean (fabric/wiring gap after a reboot?). Rebuilding (idempotent)..."
-    az vm run-command invoke -g $ResourceGroup -n $ClabVm --command-id RunShellScript `
-        --scripts "/usr/local/bin/onprem-clab-up.sh" -o none
-    Start-Sleep 15  # let OSPF/BGP converge and the LAN route re-install
-    $probe2 = az vm run-command invoke -g $ResourceGroup -n $ClabVm --command-id RunShellScript `
-        --scripts "ping -c3 -W2 172.31.20.10 2>&1 | tail -3" -o json 2>$null | ConvertFrom-Json
-    $msg2 = if ($probe2) { $probe2.value[0].message } else { "" }
-    if ($msg2 -match '0% packet loss') { Write-Ok "clab fabric rebuilt — host→LAN 0% loss." }
-    else { Write-Warn "clab host→LAN still failing after rebuild — investigate before recording." }
+    Write-Info "Ensuring clab host-probe path traverses the FABRIC (veth clabr1host → r1 → r2 → 172.31.20.10)..."
+    $wire = @'
+set -uo pipefail
+if ip link show clabr1host >/dev/null 2>&1; then
+  ip addr replace 172.31.11.1/30 dev clabr1host
+  ip link set dev clabr1host up
+  ip route replace 172.31.20.0/24 via 172.31.11.2 dev clabr1host
+  DEV=$(ip route get 172.31.20.10 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+  echo "PROBE_DEV=$DEV"
+  if ping -c2 -W2 172.31.20.10 >/dev/null 2>&1; then echo "PING=ok"; else echo "PING=fail"; fi
+else
+  echo "PROBE_DEV=none"; echo "PING=fail"
+fi
+'@
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wire))
+    $run = az vm run-command invoke -g $ResourceGroup -n $ClabVm --command-id RunShellScript `
+        --scripts "echo $b64 | base64 -d | bash" -o json 2>$null | ConvertFrom-Json
+    $out = if ($run) { ($run.value[0].message) } else { "" }
+    $dev  = if ($out -match 'PROBE_DEV=(\S+)') { $matches[1] } else { '' }
+    $ping = if ($out -match 'PING=(\S+)')      { $matches[1] } else { '' }
+
+    if ($dev -eq 'clabr1host' -and $ping -eq 'ok') {
+        Write-Ok "clab fabric healthy — probe egresses veth 'clabr1host' (through r1→r2), 0% loss."
+        return
+    }
+    if ($dev -eq 'none') {
+        Write-Warn "veth 'clabr1host' is missing — the fabric is not deployed. Rebuilding via on-VM helper..."
+        az vm run-command invoke -g $ResourceGroup -n $ClabVm --command-id RunShellScript `
+            --scripts "/usr/local/bin/onprem-clab-up.sh" -o none
+        Start-Sleep 15
+    } elseif ($dev -and $dev -ne 'clabr1host') {
+        Write-Warn "Probe was egressing '$dev' (NOT the fabric) — a stale mgmt-bridge route was short-circuiting it. Re-wired to clabr1host; re-verifying..."
+    } else {
+        Write-Warn "clab probe not healthy yet (dev='$dev' ping='$ping') — re-applying wiring and re-verifying..."
+    }
+
+    # Re-apply + re-verify (covers both the redeploy and the re-wire cases).
+    $run2 = az vm run-command invoke -g $ResourceGroup -n $ClabVm --command-id RunShellScript `
+        --scripts "echo $b64 | base64 -d | bash" -o json 2>$null | ConvertFrom-Json
+    $out2 = if ($run2) { ($run2.value[0].message) } else { "" }
+    $dev2  = if ($out2 -match 'PROBE_DEV=(\S+)') { $matches[1] } else { '' }
+    $ping2 = if ($out2 -match 'PING=(\S+)')      { $matches[1] } else { '' }
+    if ($dev2 -eq 'clabr1host' -and $ping2 -eq 'ok') {
+        Write-Ok "clab fabric ready — probe egresses veth 'clabr1host' (through r1→r2), 0% loss."
+    } else {
+        Write-Warn "clab probe still not clean (dev='$dev2' ping='$ping2') — investigate before recording; a fabric fault may not be detectable."
+    }
 }
 
 # Poll EVERY Connection Monitor in the environment until all latest results are Pass.

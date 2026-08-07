@@ -63,7 +63,7 @@ param(
     [SecureString]$AdminPassword,
     [string]$RadiusSharedSecret     = $env:RADIUS_SHARED_SECRET ?? "LabRadius2026!",
     [string]$RadiusOperatorPassword = $env:RADIUS_OPERATOR_PASSWORD ?? "OperPass2026!",
-    [string]$RepoBranch    = $env:REPO_BRANCH ?? "onprem"
+    [string]$RepoBranch    = $env:REPO_BRANCH ?? "main"
 )
 
 Set-StrictMode -Version Latest
