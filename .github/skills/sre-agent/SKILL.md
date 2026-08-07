@@ -186,7 +186,9 @@ prints a **Working-agent readiness** section that checks the automatable ones.
 | **Detect** | Alert rules that actually fire | `modules/alerts.bicep` (metric alerts on Connection Monitors) | ✅ bicep |
 | **Detect** | Agent scoped to the resources | `knowledgeGraphConfiguration.managedResources=[<rg>]` | ✅ script/bicep |
 | **Investigate** | Read telemetry (logs/metrics) | Reader + Log Analytics Reader + Monitoring Reader on RG | ✅ bicep |
+| **Investigate** | Query Connection Monitors (in **NetworkWatcherRG**, not the lab RG) | **Network Contributor on the SUBSCRIPTION** | ✅ `modules/sre-agent-sub-roles.bicep` |
 | **Investigate** | Run diagnostics (`az`, `az vm run-command`) | Contributor (accessLevel=High) | ✅ bicep |
+| **Fix** | Remediate a VM/fabric via `az vm run-command invoke` | **Virtual Machine Contributor on RG** (`runCommand/action`) | ✅ `modules/sre-agent.bicep` |
 | **Investigate** | Domain context | Knowledge base (18 files, incl. the on-prem triage skill) | ✅ `-Apply` (agentmemory) |
 | **Root-cause** | Route incident to the right expert | **Incident response plan** (filter + handler → sub-agent) | ✅ `configure-sre-agent.ps1 -Apply` |
 | **Fix** | Write access | Contributor + Network Contributor | ✅ bicep |
@@ -208,7 +210,7 @@ as a filter+handler routed to the `network-expert` sub-agent. Docs: `learn.micro
 - API: `Microsoft.App/agents@2025-05-01-preview` (bicep); GA `2026-01-01` used by `configure-sre-agent.ps1`
 - Mode: **Review** (default, `sreAgentMode` param — proposes fixes, waits for approval; set `Autonomous` for hands-off), Access: **High** (Contributor), Model: Automatic
 - Incident platform Azure Monitor is set post-deploy by `configure-sre-agent.ps1 -Apply` (NOT auto-connected)
-- Managed identity: Reader + Log Analytics Reader + Monitoring Reader + Contributor + Network Contributor on the RG, and **Monitoring Contributor on the subscription** (for alert scanning)
+- Managed identity: Reader + Log Analytics Reader + Monitoring Reader + Contributor + Network Contributor + **Virtual Machine Contributor** on the RG, **Monitoring Contributor + Network Contributor on the subscription** (alert scanning + Connection Monitor query in NetworkWatcherRG)
 
 ### Response plan isolation
 - Alert names use pattern `<prefix>-cm-checks-failed`
@@ -280,6 +282,8 @@ Also delete: SRE agent (if in separate RG), connection monitors in NetworkWatche
 | `az vm run-command` with multi-`-c` `vtysh`/`docker exec` quotes mangled → host ran unintended command (once accidentally scheduled a VM `shutdown`) | PowerShell string → `az ... --scripts` corrupts nested quotes | **Base64-encode the bash** in PowerShell (`[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bash))`) and run `echo <b64> \| base64 -d \| bash` on the VM. Use `vtysh -c 'configure terminal'` (not `conf t`). |
 | Containerlab host-veth wiring (T3) missing after a **reboot** of an existing clab VM | `/usr/local/bin/onprem-clab-up.sh` is baked by cloud-init `write_files` **once** at first boot; re-running it pulls fresh topology from git but does **not** rewrite the script, so newer host-veth lines are absent | The committed IaC is correct for a **fresh** clab VM deploy. On an existing VM, re-apply the veth IP + route manually (base64 run-command). |
 | CM portal status shows **Unknown** but LAW has recent rows | Source VMs **deallocated** → NW agents stopped probing → no fresh rollup (LAW retains historical rows) | Start the source VMs; not a config fault |
+| Agent stalls mid-incident on **"Grant permissions"** (`AuthorizationFailed` on `Microsoft.Network/networkWatchers/connectionMonitors/query/action`) → falls back to OBO | Connection Monitors live in the Azure-managed **NetworkWatcherRG**, where the identity has **no** role (its Network/Contributor roles are scoped to the lab RG) | Grant the identity **Network Contributor on the subscription** (or on NetworkWatcherRG). Now in `modules/sre-agent-sub-roles.bicep`. |
+| Agent's `az vm run-command invoke` fails: *"This method only supports read operations… Use RunAzCliWriteCommandsAsync for write operations"* | The agent classified the run-command as a **write**; in Review mode a write needs approval | Set the agent to **Autonomous** so it self-executes; ensure the identity has **Virtual Machine Contributor** on the RG (`runCommand/action`). Both are now in bicep. |
 | `onprem-to-webapp` CM broken / TM endpoints **Degraded** | Both hub **App Gateways were Stopped** (cost-saving, like deallocated VMs) → TM health probes fail | `az network application-gateway start -g netsre-rg -n netsre-hub{1,2}-appgw`; TM endpoints return **Online** and the test recovers |
 | SRE agent has no knowledge / sub-agents / response plans after deploy | Older `deploy.ps1` deployed only the agent **resource** | Fixed: `deploy.ps1` now runs `configure-sre-agent.ps1 -Apply` post-deploy (Azure Monitor + knowledge + sub-agents + response plans). Re-run it manually if it was skipped. Skills/connectors/scheduled-tasks remain portal-only |
 | Data-plane `PUT` returns **HTTP 405** (filters/handlers/apply) | UTF-8 BOM in the JSON body, `titleNotContains` sent as a string not an array, or the agent is mid-upgrade | Write JSON with no BOM (`[IO.File]::WriteAllText`), pass `titleNotContains:[]`, send `Accept: application/json`; if mid-upgrade, re-run `-Apply` once `provisioningState=Succeeded` |

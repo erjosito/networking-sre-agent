@@ -171,6 +171,7 @@ Typical latencies after inject (use these to plan cuts):
 | A second, parallel incident opens for the same fault | Per-rule dedup — one fault trips two alert rules; no cross-signal merge | Expected; see the [mapping-limitations doc](./sre-agent-incident-mapping-limitations.md). Follow either incident |
 | Re-running the same take does nothing | Response-plan `cooldownHours` gate | Lower cooldown or clear the prior incident |
 | Investigation ends with *"internal error"* | Platform-side transient | Delete the incident and re-inject; not a knowledge fault |
+| Agent stalls asking to **grant permissions** (OBO fallback) | Identity lacks a role for the action — commonly `connectionMonitors/query/action` in **NetworkWatcherRG**, or `runCommand/action` on a VM | Ensure the identity has **Network Contributor on the subscription** and **Virtual Machine Contributor on the RG** (both now in bicep: `sre-agent-sub-roles.bicep`, `sre-agent.bicep`). Re-deploy those modules if remediating an older environment |
 | Tail can't get a token / 401 | `az login` / audience | The watcher refreshes automatically; if it persists, re-`az login` |
 
 ---

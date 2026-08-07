@@ -115,6 +115,11 @@ var logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a893'
 var monitoringReaderRoleId = '43d0d8ad-25c7-4714-9337-8ba259a9fe05'
 var contributorRoleId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
 var networkContributorRoleId = '4d97b98b-1d4f-4787-a291-c67834d212e7'
+// Virtual Machine Contributor — grants Microsoft.Compute/virtualMachines/runCommand/action
+// so the agent can remediate the on-prem/containerlab fabric via `az vm run-command invoke`
+// (e.g. reconfigure FRR/OSPF) without stalling on an interactive permission grant. Assigned
+// unconditionally so run-command remediation works even at accessLevel 'Low' (no Contributor).
+var vmContributorRoleId = '9980e02c-c2be-4d73-94e8-173b1dc7cf3c'
 
 // Reader — always assigned
 resource readerAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -162,6 +167,18 @@ resource networkContributorAssignment 'Microsoft.Authorization/roleAssignments@2
   properties: {
     principalId: agentIdentity.properties.principalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', networkContributorRoleId)
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Virtual Machine Contributor — always assigned so the agent can run remediation
+// commands on lab VMs (Microsoft.Compute/virtualMachines/runCommand/action), e.g.
+// reconfiguring the containerlab FRR/OSPF fabric on netsre-onprem-clab.
+resource vmContributorAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, agentIdentity.id, vmContributorRoleId)
+  properties: {
+    principalId: agentIdentity.properties.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', vmContributorRoleId)
     principalType: 'ServicePrincipal'
   }
 }

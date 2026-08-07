@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "2830407340057214104"
+      "templateHash": "11538733888359852040"
     }
   },
   "parameters": {
@@ -5583,7 +5583,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "832118016130428282"
+              "templateHash": "4985013336354916977"
             }
           },
           "parameters": {
@@ -5659,7 +5659,8 @@
             "logAnalyticsReaderRoleId": "73c42c96-874c-492b-b04d-ab87d138a893",
             "monitoringReaderRoleId": "43d0d8ad-25c7-4714-9337-8ba259a9fe05",
             "contributorRoleId": "b24988ac-6180-42a0-ab88-20f7382dd24c",
-            "networkContributorRoleId": "4d97b98b-1d4f-4787-a291-c67834d212e7"
+            "networkContributorRoleId": "4d97b98b-1d4f-4787-a291-c67834d212e7",
+            "vmContributorRoleId": "9980e02c-c2be-4d73-94e8-173b1dc7cf3c"
           },
           "resources": [
             {
@@ -5787,6 +5788,19 @@
               "dependsOn": [
                 "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix')))]"
               ]
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceGroup().id, resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix'))), variables('vmContributorRoleId'))]",
+              "properties": {
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix'))), '2023-01-31').principalId]",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('vmContributorRoleId'))]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-sre-agent-identity', parameters('prefix')))]"
+              ]
             }
           ],
           "outputs": {
@@ -5852,7 +5866,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.40.2.10011",
-              "templateHash": "18227685052287609473"
+              "templateHash": "14539244881109325118"
             }
           },
           "parameters": {
@@ -5864,7 +5878,8 @@
             }
           },
           "variables": {
-            "monitoringContributorRoleId": "749f88d5-cbae-40b8-bcfc-e573ddc772fa"
+            "monitoringContributorRoleId": "749f88d5-cbae-40b8-bcfc-e573ddc772fa",
+            "networkContributorRoleId": "4d97b98b-1d4f-4787-a291-c67834d212e7"
           },
           "resources": [
             {
@@ -5874,6 +5889,16 @@
               "properties": {
                 "principalId": "[parameters('principalId')]",
                 "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('monitoringContributorRoleId'))]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(subscription().id, parameters('principalId'), variables('networkContributorRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('principalId')]",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('networkContributorRoleId'))]",
                 "principalType": "ServicePrincipal"
               }
             }
