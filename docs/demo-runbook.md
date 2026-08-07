@@ -64,11 +64,13 @@ minutes instead of hours.
   Analytics until **every** Connection Monitor in the environment reports `Pass` (not just the
   scenario's source — up to `-BaselineTimeoutMinutes`, default 15) — so you inject into a
   *known-healthy* environment and the only red is the one you cause.
-- ⚠️ **Agent in Autonomous mode** so it *acts* on-camera, not just proposes. Verify on a
-  **freshly loaded** portal page (the toggle has a propagation lag — see the
+- ✅ **Agent in Autonomous mode** so it *acts* on-camera, not just proposes. **Step 0 reads the
+  agent's `properties.actionConfiguration.mode` and, if it is not `Autonomous`, offers to switch it
+  for you** (auto-switches when non-interactive; asks first with `-Interactive`). Note the toggle has
+  a propagation lag — if a just-opened incident still only proposes, refresh the portal and let a
+  fresh incident open (see the
   [mapping-limitations doc](./sre-agent-incident-mapping-limitations.md#5-ui-autonomy-toggle-has-a-propagation-lag)).
-  Config: `sre-agent-config/config.yaml → agent.mode: Autonomous`. (Step 0 prints a reminder but
-  cannot toggle it for you.)
+  Config default: `sre-agent-config/config.yaml → agent.mode: Autonomous`.
 - ⚠️ **Lab deployed & healthy** the first time: `.\scripts\check-health.ps1` (spot-check sections
   5, 6, 20). Step 0 assumes the lab already exists — it starts/repairs, it does not deploy.
 - ⚠️ **Knowledge & response plans applied**: `.\scripts\configure-sre-agent.ps1` (readiness report
@@ -103,7 +105,7 @@ for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-N
 
 | Phase | Script action | Talk track |
 |-------|---------------|------------|
-| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; start any stopped **App Gateways** (they front the webapp Traffic Manager); (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until **all** Connection Monitors report `Pass` | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
+| **0 · Pre-flight** *(always)* | `az account show`; start **all** deallocated VMs; start any stopped **App Gateways** (they front the webapp Traffic Manager); (clab) rebuild fabric+wiring via `onprem-clab-up.sh` if `172.31.20.10` is unreachable; `clear-incidents.ps1 -Force`; wait until **all** Connection Monitors report `Pass`; verify the agent is in **Autonomous** mode (offer to switch if not) | *"First the script makes the lab clean: it starts every VM, repairs the on-prem fabric, deletes old incidents, and waits for all Connection Monitors to go green — so the only thing red after this is the fault I inject next. Old incidents matter because the agent dedups per alert-rule over a 7-day window, and a stale one would swallow my new alert."* |
 | **1 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
 | **2 · Watch** | `watch-incidents.ps1 -Quiet` — follows the investigation silently and prints only the **final message(s)** when the agent finishes, the incident resolves, or activity **stalls** for 3 min (with `-Timeline`, a cascade watcher runs first) | *"Rather than scroll every message, I let it work and show the conclusion. Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident — then it builds a plan, pulls telemetry, runs diagnostics, and reasons to the root cause."* |
 | **3 · Revert** | First checks whether the **agent already remediated** the fault (scenario Connection Monitor GREEN again). If so it says so and skips the manual revert (non-interactive) or asks whether to revert anyway (`-Interactive`); otherwise `inject-fault.ps1 … -Revert` | *"The script verifies whether the agent fixed it on its own before I touch anything — if connectivity is already restored there's nothing to revert; otherwise it restores the environment for the next take."* (`-NoRevert` leaves it as-is.) |

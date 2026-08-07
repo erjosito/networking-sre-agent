@@ -243,6 +243,35 @@ function Resolve-Agent {
     $script:AgentEndpoint = az resource show -g $ResourceGroup --resource-type "Microsoft.App/agents" -n $script:AgentName --query "properties.agentEndpoint" -o tsv 2>$null
 }
 
+# Verify the agent's global autonomy mode. Autonomous is required for it to
+# remediate on-camera (Manual/ReadOnly only propose). Offer to switch it.
+function Ensure-AgentAutonomous {
+    Resolve-Agent
+    if (-not $script:AgentName) { Write-Warn "Could not resolve the SRE Agent name — skipping autonomy check."; return }
+    $mode = az resource show -g $ResourceGroup --resource-type "Microsoft.App/agents" -n $script:AgentName --query "properties.actionConfiguration.mode" -o tsv 2>$null
+    if (-not $mode) { Write-Warn "Could not read the agent's mode — verify manually in the portal (Autonomous recommended)."; return }
+    if ($mode -eq 'Autonomous') { Write-Ok "SRE Agent mode: Autonomous — it will remediate on-camera."; return }
+
+    Write-Warn "SRE Agent mode is '$mode' (not Autonomous) — it will only PROPOSE fixes, not apply them on-camera."
+    $switch = $true
+    if ($Interactive) {
+        $ans = Read-Host "Switch the agent to Autonomous now? (Y/n)"
+        $switch = ($ans -notmatch '^(n|no)$')
+    } else {
+        Write-Info "Switching the agent to Autonomous automatically (non-interactive)."
+    }
+    if (-not $switch) { Write-Warn "Left the agent in '$mode' mode — it will not remediate autonomously."; return }
+
+    $id = az resource show -g $ResourceGroup --resource-type "Microsoft.App/agents" -n $script:AgentName --query id -o tsv 2>$null
+    if (-not $id) { Write-Warn "Could not resolve the agent resource id — set Autonomous manually in the portal."; return }
+    Write-Info "Setting properties.actionConfiguration.mode = Autonomous..."
+    az resource update --ids $id --set properties.actionConfiguration.mode=Autonomous -o none 2>$null
+    Start-Sleep 5
+    $now = az resource show -g $ResourceGroup --resource-type "Microsoft.App/agents" -n $script:AgentName --query "properties.actionConfiguration.mode" -o tsv 2>$null
+    if ($now -eq 'Autonomous') { Write-Ok "SRE Agent switched to Autonomous."; Record-Event "SRE Agent set to Autonomous" }
+    else { Write-Warn "Mode is still '$now' after the update — the toggle has a propagation lag; verify on a freshly-loaded portal tab." }
+}
+
 function Get-DpToken {
     if (-not $script:DpToken -or ([datetime]::UtcNow - $script:DpTokenAt).TotalMinutes -gt 40) {
         $script:DpToken = az account get-access-token --resource $DataPlaneResource --query accessToken -o tsv 2>$null
@@ -407,7 +436,7 @@ if (-not $FaultName) {
 }
 Write-Host ""
 Write-Info "Resource group: $ResourceGroup    Prefix: $Prefix"
-Write-Info "Autonomy: the agent acts on whatever mode it is globally set to (Autonomous recommended)."
+Write-Info "Autonomy: pre-flight verifies the agent is in Autonomous mode and offers to switch it if not."
 if ($Timeline) { Write-Info "Timeline mode ON — timestamping actions and watching for each cascade event." }
 
 # ── 0. Pre-flight — ALWAYS runs, auto-fixes to reach a clean baseline ────────
@@ -421,8 +450,7 @@ Write-Info "Deleting any existing SRE Agent incidents (so the fault opens a fres
 & "$here\clear-incidents.ps1" -Force
 Record-Event "Existing incidents cleared"
 Wait-AllCmGreen -TimeoutMin $BaselineTimeoutMinutes | Out-Null
-Write-Info "Reminder: confirm the agent is in AUTONOMOUS mode on a freshly-loaded portal tab"
-Write-Info "(the toggle has a propagation lag) so it remediates on-camera instead of only proposing."
+Ensure-AgentAutonomous
 Write-Ok "Pre-flight complete — clean baseline ready."
 
 if ($PreflightOnly) {
