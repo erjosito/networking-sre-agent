@@ -116,12 +116,13 @@ For a recording-oriented end-to-end run:
 .\scripts\demo-observability.ps1 -PresenterMode
 ```
 
-The script restores a clean baseline, records existing issues, runs the selected
-scenario, watches the API/telemetry/alert/issue cascade, displays any new issue,
-resets or reverts the scenario, and verifies the baseline user transaction. Missing
-delayed telemetry, alerts, or a preview agent-created issue are warnings after
-cleanup unless `-StrictVerification` is set; scenario behavior or recovery failures
-still exit nonzero.
+The script restores a clean baseline, starts and waits for the Observability API VM
+and both lab Application Gateways in Phase 0, records existing issues, runs the
+selected scenario, watches the API/telemetry/alert/issue cascade, displays any new
+issue, resets or reverts the scenario, and verifies the baseline user transaction.
+Missing delayed telemetry, alerts, or a preview agent-created issue are warnings
+after cleanup unless `-StrictVerification` is set; scenario behavior or recovery
+failures still exit nonzero.
 
 | Scenario | Command | Expected boundary | Infrastructure mutation |
 |---|---|---|---|
@@ -141,7 +142,7 @@ Presenter options can be combined:
 | `-OpenPortal` | Opens each suggested Azure resource once in the default browser. |
 | `-Interactive` | Pauses before fault injection and recovery without printing the detailed hints. |
 | `-Timeline` | Prints relative timestamps for the observed signal cascade. |
-| `-PreflightOnly` | Restores and verifies the baseline without injecting the fault. |
+| `-PreflightOnly` | Restores and verifies the baseline after starting and waiting for the Observability API VM and both lab Application Gateways. |
 | `-StrictVerification` | Also exits nonzero when telemetry, alerts, or issue creation are not observed. Useful for automated validation. |
 
 At each transaction stage, the script prints the exact command executed inside the

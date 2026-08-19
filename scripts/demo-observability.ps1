@@ -5,7 +5,8 @@
 .DESCRIPTION
     Demonstrates one of three opt-in application profiles:
 
-      0. Verify the telemetry API is healthy and baseline transactions succeed.
+      0. Start and verify the Observability API VM and lab Application Gateways,
+         then confirm the baseline transaction succeeds.
       1. Record existing Azure Monitor issue IDs.
       2. Run DNS split-brain, dependency latency, or an application-only exception.
       3. Watch request/dependency/latency/exception signals become related alerts
@@ -45,6 +46,10 @@
 .PARAMETER PreflightOnly
     Restore and verify the baseline without injecting the fault.
 
+.PARAMETER InfrastructureTimeoutMinutes
+    Maximum time to wait for the Observability API VM and lab Application
+    Gateways to reach a ready state during Phase 0 (default 15).
+
 .PARAMETER NoRevert
     Leave the DNS fault active after the watch phase.
 
@@ -81,6 +86,7 @@ param(
     [switch]$StrictVerification,
     [int]$TimeoutMinutes = 30,
     [int]$BaselineTimeoutMinutes = 12,
+    [int]$InfrastructureTimeoutMinutes = 15,
     [int]$PollSeconds = 20,
     [string]$Prefix = "netsre",
     [Alias("g")]
@@ -268,12 +274,85 @@ function Assert-Prerequisites {
 }
 
 function Ensure-ApiVmRunning {
-    $power = az vm get-instance-view -g $ResourceGroup -n $ApiVmName --query "instanceView.statuses[?starts_with(code,'PowerState/')].displayStatus | [0]" -o tsv
-    if ($power -ne "VM running") {
-        Write-Info "Starting $ApiVmName..."
-        az vm start -g $ResourceGroup -n $ApiVmName -o none
+    $deadline = (Get-Date).AddMinutes($InfrastructureTimeoutMinutes)
+    $power = az vm get-instance-view -g $ResourceGroup -n $ApiVmName --query "instanceView.statuses[?starts_with(code,'PowerState/')].displayStatus | [0]" -o tsv 2>$null
+    if ($power -eq "VM running") {
+        Write-Ok "$ApiVmName is already running."
+        Record-Event "API VM ready" "$ApiVmName already running"
+        return
     }
-    Write-Ok "$ApiVmName is running"
+    if (-not $power) {
+        throw "Could not read the power state for $ApiVmName."
+    }
+
+    Write-Info "Starting $ApiVmName from '$power'..."
+    az vm start -g $ResourceGroup -n $ApiVmName --no-wait -o none
+    do {
+        Start-Sleep 15
+        $power = az vm get-instance-view -g $ResourceGroup -n $ApiVmName --query "instanceView.statuses[?starts_with(code,'PowerState/')].displayStatus | [0]" -o tsv 2>$null
+        if ($power -eq "VM running") {
+            Write-Ok "$ApiVmName is running."
+            Record-Event "API VM ready" "$ApiVmName reached VM running"
+            return
+        }
+        Write-Info "  waiting for $($ApiVmName) (state: $power)"
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Timed out after $InfrastructureTimeoutMinutes minute(s) waiting for $ApiVmName to reach 'VM running' (last observed state: '$($power)')."
+}
+
+function Ensure-AppGatewaysRunning {
+    $expectedNames = @("$Prefix-hub1-appgw", "$Prefix-hub2-appgw")
+    Write-Info "Checking lab Application Gateways in $ResourceGroup..."
+    $gateways = @(az network application-gateway list -g $ResourceGroup -o json 2>$null | ConvertFrom-Json)
+
+    $targets = @()
+    foreach ($name in $expectedNames) {
+        $gateway = $gateways | Where-Object { $_.name -eq $name } | Select-Object -First 1
+        if (-not $gateway) {
+            throw "Required lab Application Gateway not found: $name. Phase 0 requires both $($expectedNames -join ', ') to be present."
+        }
+
+        $state = $gateway.operationalState
+        if ($state -eq "Running") {
+            Write-Ok "$name is already running."
+            Record-Event "App Gateway ready" "$name already running"
+            continue
+        }
+
+        Write-Info "Starting $name from '$state'..."
+        az network application-gateway start -g $ResourceGroup -n $name --no-wait -o none
+        $targets += [pscustomobject]@{ Name = $name; LastState = $state }
+    }
+
+    if ($targets.Count -eq 0) {
+        Write-Ok "Both lab Application Gateways are already running."
+        return
+    }
+
+    $deadline = (Get-Date).AddMinutes($InfrastructureTimeoutMinutes)
+    $pending = @($targets)
+    do {
+        Start-Sleep 20
+        $nextPending = @()
+        foreach ($target in $pending) {
+            $state = az network application-gateway show -g $ResourceGroup -n $target.Name --query "operationalState" -o tsv 2>$null
+            if ($state -eq "Running") {
+                Write-Ok "$($target.Name) is running."
+                Record-Event "App Gateway ready" "$($target.Name) reached Running"
+            } else {
+                if (-not $state) { $state = "unknown" }
+                Write-Info "  waiting for $($target.Name) (state: $state)"
+                $nextPending += [pscustomobject]@{ Name = $target.Name; LastState = $state }
+            }
+        }
+        $pending = @($nextPending)
+    } while ($pending.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+    if ($pending.Count -gt 0) {
+        $lastStates = ($pending | ForEach-Object { "$($_.Name)='$($_.LastState)'" }) -join ', '
+        throw "Timed out after $InfrastructureTimeoutMinutes minute(s) waiting for lab Application Gateways to reach Running: $lastStates."
+    }
 }
 
 function Invoke-ApiTransaction {
@@ -544,8 +623,10 @@ function Show-OnCallEpilogue {
 }
 
 function Restore-Baseline {
-    Banner "PHASE 0 - BASELINE"
+    Banner "PHASE 0 - PREPARE BASELINE"
+    Write-Info "Phase 0 starts and waits for the Observability API VM and both lab Application Gateways before baseline validation."
     Ensure-ApiVmRunning
+    Ensure-AppGatewaysRunning
 
     $nvaDns = az network lb frontend-ip show -g $ResourceGroup -n nva-frontend `
         --lb-name "$Prefix-hub1-nva-lb" --query privateIPAddress -o tsv
