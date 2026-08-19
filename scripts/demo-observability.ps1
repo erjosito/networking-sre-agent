@@ -211,9 +211,9 @@ $ScenarioConfig = @{
         ExpectedStatus = 503
         Fault = "pe-dns-override"
         Alerts = @("$Prefix-api-transaction-failures", "$Prefix-api-dependency-failures")
-        Layer = "Private Endpoint DNS path in spoke11"
-        Impact = "The user transaction fails because Private Endpoint DNS resolves outside the private address space."
-        Expected = "private_endpoint_dns fails while cross_hub_http and other configured dependencies remain healthy"
+        Layer = "spoke11 DNS / Private Endpoint invariant"
+        Impact = "The API returns 503 because the dependency must stay on the private endpoint path; cross_hub_http stays healthy and optional on-prem should stay healthy."
+        Expected = "private_endpoint_dns fails while cross_hub_http stays healthy; public DNS resolution is treated as a security/connectivity failure"
     }
     "dependency-latency" = @{
         Profile = "dependency-latency"
@@ -508,6 +508,31 @@ function Show-SreHandoff {
     Show-PromptCard -Title "OBSERVABILITY TO SRE HANDOFF" -Prompt "Investigate and safely remediate the incident affecting '$ApiRoleName'. Observability evidence: $($ScenarioConfig.Impact) Localized layer: $($ScenarioConfig.Layer). Expected signal boundary: $($ScenarioConfig.Expected). Correlate only evidence from $($script:T0.ToString('o')) onward and preserve the healthy dependencies. If remediation is unsafe, unavailable, or fails, return a support-escalation package with symptoms, business impact, evidence, diagnostics already run, exact commands, and remaining hypotheses. After remediation, verify the user transaction with: $recoveryCommand" -Force
 }
 
+function Show-DnsSplitBrainBriefing {
+    param(
+        [string]$SpokeDns = "10.1.1.200",
+        [string]$PrivateEndpointIp = "10.1.4.4"
+    )
+
+    Write-Host ""
+    Write-Host "[DNS SPLIT-BRAIN BRIEFING]" -ForegroundColor Yellow
+    Write-Info "This is split-brain DNS, not a total outage: the same storage static-website FQDN resolves privately through the intended path, but to a public address from spoke11 when Azure-provided DNS is used."
+    Write-Info "Normal chain: API VM -> spoke11 custom DNS $SpokeDns -> Hub1 NVA dnsmasq -> Azure DNS in the hub/private-zone-linked context -> privatelink.web.core.windows.net -> PE $PrivateEndpointIp."
+    Write-Info "Fault: pe-dns-override resets spoke11 VNet DNS to Azure-provided DNS; because the private DNS zone is linked only to hub VNets, the spoke gets the public answer instead of the private one."
+    Write-Info "The fault script restarts the relevant workloads/VMs so DHCP-provided DNS settings renew; that is why the change is not instant."
+    Write-Info "Blast radius stays bounded: cross_hub_http remains healthy, optional on-prem should stay healthy if configured, and the API returns 503 because the transaction treats public resolution as a security/connectivity failure."
+    Write-Info "Recovery proof: restore $SpokeDns, renew settings or restart, and the same unmodified transaction returns 200 with private resolution again."
+
+    Show-PresenterCue -Title "Explain the controlled DNS change" -TalkingPoints @(
+        "DNS split-brain here means the same storage static-website FQDN resolves to the private endpoint IP through the intended resolver chain, but to a public address when spoke11 uses Azure-provided DNS."
+        "The private DNS zone is linked only to the hub VNets, so pe-dns-override removes the spoke from the intended resolution path without creating a total DNS outage."
+        "The workload restart is intentional: DHCP-provided DNS settings have to be renewed before the split-brain becomes visible in the transaction."
+        "Before and after, show the DNS server setting, the resolved address/detail, the failed private_endpoint_dns check, the healthy cross_hub_http check, and the HTTP 503."
+        "Observability Agent should infer one bounded application issue and the likely layer; the SRE Agent should restore the custom DNS path and verify private resolution returns."
+    ) -PortalPath "Virtual networks -> $Prefix-spoke11-vnet -> Settings -> DNS servers" `
+        -ResourceId $script:ResourceIds.SpokeVnet
+}
+
 function Show-OnCallEpilogue {
     if (-not $PresenterHints) { return }
     Banner "ON-CALL EPILOGUE"
@@ -565,12 +590,7 @@ if ($PreflightOnly) {
 Pause-Step "run scenario '$Scenario'"
 Banner "PHASE 1 - RUN $($Scenario.ToUpperInvariant())"
 if ($Scenario -eq "dns-split-brain") {
-    Show-PresenterCue -Title "Explain the controlled DNS change" -TalkingPoints @(
-        "Spoke11 normally sends DNS to the Hub1 NVA at 10.1.1.200."
-        "The fault switches the VNet to Azure-provided DNS, but the Private DNS zone is linked only to the hubs."
-        "Predict the blast radius: Private Endpoint DNS should fail while cross-hub HTTP stays healthy."
-    ) -PortalPath "Virtual networks -> $Prefix-spoke11-vnet -> Settings -> DNS servers" `
-        -ResourceId $script:ResourceIds.SpokeVnet
+    Show-DnsSplitBrainBriefing
 } elseif ($Scenario -eq "dependency-latency") {
     Show-PresenterCue -Title "Explain the dependency-specific latency profile" -TalkingPoints @(
         "The request header selects an application profile; no Azure resource is changed."
@@ -732,11 +752,20 @@ try {
             Show-TransactionResult -Result $recovered -Label "RECOVERY RESPONSE"
             Write-Ok "Baseline user transaction verified."
             Record-Event "User transaction verified"
-            Show-PresenterCue -Title "Close with recovery evidence" -TalkingPoints @(
+            $recoveryTalkingPoints = @(
                 "The same baseline transaction is healthy again."
                 "All configured dependency checks succeed after remediation or profile reset."
                 "The Observability Agent supplied correlation and localization; remediation ownership is explicit."
-            ) -PortalPath "Application Insights -> Application Map and Failures; set time range to Last 30 minutes" `
+            )
+            if ($Scenario -eq "dns-split-brain") {
+                $recoveryTalkingPoints = @(
+                    "The same baseline transaction is healthy again."
+                    "Spoke11 is back on 10.1.1.200; private resolution returns and the same unmodified request now gets HTTP 200."
+                    "All configured dependency checks succeed after remediation or profile reset."
+                    "The Observability Agent supplied correlation and localization; remediation ownership is explicit."
+                )
+            }
+            Show-PresenterCue -Title "Close with recovery evidence" -TalkingPoints $recoveryTalkingPoints -PortalPath "Application Insights -> Application Map and Failures; set time range to Last 30 minutes" `
                 -ResourceId $script:ResourceIds.AppInsights
         } else {
             Write-Warn "The application did not recover before the baseline timeout."
