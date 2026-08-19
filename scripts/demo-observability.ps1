@@ -46,6 +46,13 @@
 .PARAMETER PreflightOnly
     Restore and verify the baseline without injecting the fault.
 
+.PARAMETER ApiEndpoint
+    Override the discovered Hub1 Application Gateway endpoint. The value should
+    be the base URL, for example http://example.eastus.cloudapp.azure.com:8080.
+
+.PARAMETER ForceRunCommand
+    Use Azure VM Run Command even when optional Application Gateway ingress exists.
+
 .PARAMETER InfrastructureTimeoutMinutes
     Maximum time to wait for the Observability API VM and lab Application
     Gateways to reach a ready state during Phase 0 (default 15).
@@ -63,6 +70,8 @@
 
 .EXAMPLE
     .\scripts\demo-observability.ps1 -PresenterMode -OpenPortal
+    .\scripts\demo-observability.ps1 -ApiEndpoint http://example.eastus.cloudapp.azure.com:8080
+    .\scripts\demo-observability.ps1 -ForceRunCommand -PreflightOnly
     .\scripts\demo-observability.ps1 -Scenario dependency-latency -PresenterHints
     .\scripts\demo-observability.ps1 -Scenario application-exception -PresenterHints -InvestigationStart PortalContext
     .\scripts\demo-observability.ps1 -PresenterHints -Timeline
@@ -84,6 +93,8 @@ param(
     [switch]$PreflightOnly,
     [switch]$NoRevert,
     [switch]$StrictVerification,
+    [string]$ApiEndpoint,
+    [switch]$ForceRunCommand,
     [int]$TimeoutMinutes = 30,
     [int]$BaselineTimeoutMinutes = 12,
     [int]$InfrastructureTimeoutMinutes = 15,
@@ -210,6 +221,11 @@ $script:ResourceIds = @{}
 $script:ExistingIssueIds = @{}
 $script:FaultInjected = $false
 $script:LatestIssue = $null
+$script:ResolvedApiEndpoint = ""
+$script:UseDirectHttp = $false
+$script:IngressDiscovered = $false
+$script:TransportReason = ""
+$script:Hub1AppGatewayName = "$Prefix-hub1-appgw"
 
 $ScenarioConfig = @{
     "dns-split-brain" = @{
@@ -243,7 +259,85 @@ $ScenarioConfig = @{
 
 function Get-ApiCurlCommand {
     param([string]$ScenarioLabel, [string]$Profile)
-    return "curl --silent --show-error --max-time 30 --header 'X-Lab-Scenario: $ScenarioLabel' --header 'X-Lab-Profile: $Profile' --write-out '\nHTTP_STATUS=%{http_code}\n' http://127.0.0.1:8080/api/transaction"
+    $target = if ($script:UseDirectHttp) {
+        "$($script:ResolvedApiEndpoint)/api/transaction"
+    } else {
+        "http://127.0.0.1:8080/api/transaction"
+    }
+    return "curl --silent --show-error --max-time 30 --header 'X-Lab-Scenario: $ScenarioLabel' --header 'X-Lab-Profile: $Profile' --write-out '\nHTTP_STATUS=%{http_code}\n' $target"
+}
+
+function Normalize-ApiEndpoint {
+    param([string]$Value)
+    $uri = $null
+    if (-not [uri]::TryCreate($Value, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -notin @("http", "https")) {
+        throw "ApiEndpoint must be an absolute HTTP or HTTPS URL."
+    }
+    return $Value.TrimEnd("/")
+}
+
+function Resolve-ApiTransport {
+    $gatewayJson = az network application-gateway show -g $ResourceGroup `
+        -n $script:Hub1AppGatewayName -o json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $gatewayJson) {
+        throw "Could not inspect required Application Gateway $($script:Hub1AppGatewayName)."
+    }
+    $gateway = $gatewayJson | ConvertFrom-Json
+    $listener = @($gateway.httpListeners |
+        Where-Object name -eq "observability-api-listener") | Select-Object -First 1
+    $script:IngressDiscovered = [bool]$listener
+
+    $discoveredEndpoint = ""
+    if ($listener) {
+        $portName = ([string]$listener.frontendPort.id).Split("/")[-1]
+        $frontendPort = @($gateway.frontendPorts |
+            Where-Object name -eq $portName) | Select-Object -First 1
+        if ($frontendPort) {
+            $publicIpJson = az network public-ip show -g $ResourceGroup `
+                -n "$Prefix-hub1-appgw-pip" -o json 2>$null
+            if ($LASTEXITCODE -eq 0 -and $publicIpJson) {
+                $publicIp = $publicIpJson | ConvertFrom-Json
+                $hostName = if ($publicIp.dnsSettings -and $publicIp.dnsSettings.fqdn) {
+                    $publicIp.dnsSettings.fqdn
+                } else {
+                    $publicIp.ipAddress
+                }
+                if ($hostName) {
+                    $discoveredEndpoint = "http://${hostName}:$($frontendPort.port)"
+                }
+            }
+        }
+    }
+
+    if ($ForceRunCommand) {
+        $script:UseDirectHttp = $false
+        $script:TransportReason = "forced by -ForceRunCommand"
+        if ($ApiEndpoint) {
+            Write-Warn "-ApiEndpoint is ignored because -ForceRunCommand was specified."
+        }
+        return
+    }
+
+    if ($ApiEndpoint) {
+        $script:ResolvedApiEndpoint = Normalize-ApiEndpoint -Value $ApiEndpoint
+        $script:UseDirectHttp = $true
+        $script:TransportReason = "explicit -ApiEndpoint override"
+        return
+    }
+
+    if (-not $listener) {
+        $script:UseDirectHttp = $false
+        $script:TransportReason = "optional AppGW listener is not configured"
+        return
+    }
+    if (-not $discoveredEndpoint) {
+        throw "The Observability AppGW listener exists, but its frontend port or Hub1 public IP/FQDN could not be resolved."
+    }
+
+    $script:ResolvedApiEndpoint = $discoveredEndpoint
+    $script:UseDirectHttp = $true
+    $script:TransportReason = "discovered observability-api-listener"
 }
 
 function Assert-Prerequisites {
@@ -271,6 +365,7 @@ function Assert-Prerequisites {
     $script:LawCustomerId = az monitor log-analytics workspace show -g $ResourceGroup -n "$Prefix-law" --query customerId -o tsv
     $script:SubscriptionId = $account.id
     $script:TenantId = $account.tenantId
+    Resolve-ApiTransport
 }
 
 function Ensure-ApiVmRunning {
@@ -361,6 +456,48 @@ function Invoke-ApiTransaction {
         [string]$Profile = "baseline"
     )
     $command = Get-ApiCurlCommand -ScenarioLabel $ScenarioLabel -Profile $Profile
+    if ($script:UseDirectHttp) {
+        try {
+            $response = Invoke-WebRequest `
+                -Uri "$($script:ResolvedApiEndpoint)/api/transaction" `
+                -Method Get `
+                -Headers @{
+                    "X-Lab-Scenario" = $ScenarioLabel
+                    "X-Lab-Profile" = $Profile
+                } `
+                -TimeoutSec 30 `
+                -SkipHttpErrorCheck `
+                -ErrorAction Stop
+            $rawBody = [string]$response.Content
+            $body = $null
+            if ($rawBody) {
+                try {
+                    $body = $rawBody | ConvertFrom-Json
+                } catch {
+                    return [pscustomobject]@{
+                        Status = [int]$response.StatusCode
+                        Body = $null
+                        Raw = "Response body was not valid JSON: $($_.Exception.Message)`n$rawBody"
+                        Command = $command
+                    }
+                }
+            }
+            return [pscustomobject]@{
+                Status = [int]$response.StatusCode
+                Body = $body
+                Raw = $rawBody
+                Command = $command
+            }
+        } catch {
+            return [pscustomobject]@{
+                Status = 0
+                Body = $null
+                Raw = $_.Exception.Message
+                Command = $command
+            }
+        }
+    }
+
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($command))
     try {
         $raw = az vm run-command invoke -g $ResourceGroup -n $ApiVmName `
@@ -622,11 +759,70 @@ function Show-OnCallEpilogue {
     Write-Host "  HANDOFF     : Transfer the localized layer, evidence, exact prompt, owner, and remaining risk."
 }
 
+function Assert-DirectApiHealth {
+    if (-not $script:UseDirectHttp) { return }
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        throw "Direct HTTP mode requires PowerShell 7 or later."
+    }
+
+    $healthUrl = "$($script:ResolvedApiEndpoint)/healthz"
+    Write-Info "Verifying AppGW ingress at $healthUrl..."
+    $deadline = (Get-Date).AddMinutes($BaselineTimeoutMinutes)
+    $lastStatus = 0
+    $lastBody = ""
+    $lastError = ""
+    do {
+        try {
+            $response = Invoke-WebRequest -Uri $healthUrl -Method Get `
+                -TimeoutSec 30 -SkipHttpErrorCheck -ErrorAction Stop
+            $lastStatus = [int]$response.StatusCode
+            $lastBody = [string]$response.Content
+            $health = $null
+            if ($lastBody) {
+                try {
+                    $health = $lastBody | ConvertFrom-Json
+                } catch {
+                    $lastError = "HTTP $lastStatus returned invalid JSON: $($_.Exception.Message)"
+                }
+            }
+            if ($lastStatus -eq 200 -and $health -and $health.status -eq "ok") {
+                Write-Ok "Direct AppGW health check succeeded."
+                Record-Event "API ingress healthy" $healthUrl
+                return
+            }
+            if ($health) {
+                $lastError = "HTTP $lastStatus returned health status '$($health.status)'"
+            } elseif ([string]::IsNullOrWhiteSpace($lastBody)) {
+                $lastError = "HTTP $lastStatus returned an empty body"
+            }
+        } catch {
+            $lastStatus = 0
+            $lastBody = ""
+            $lastError = $_.Exception.Message
+        }
+        Write-Host "." -NoNewline -ForegroundColor DarkGray
+        Start-Sleep ([math]::Min($PollSeconds, 15))
+    } while ((Get-Date) -lt $deadline)
+    Write-Host ""
+
+    $healthCommand = "az network application-gateway show-backend-health -g `"$ResourceGroup`" -n `"$($script:Hub1AppGatewayName)`" -o jsonc"
+    throw "AppGW ingress was selected but $healthUrl is unhealthy ($lastError $lastBody). Refusing a silent Run Command fallback. Verify the presenter source CIDR and inspect backend health with: $healthCommand"
+}
+
 function Restore-Baseline {
     Banner "PHASE 0 - PREPARE BASELINE"
     Write-Info "Phase 0 starts and waits for the Observability API VM and both lab Application Gateways before baseline validation."
     Ensure-ApiVmRunning
     Ensure-AppGatewaysRunning
+    if ($script:UseDirectHttp) {
+        Write-Ok "Selected transport: direct HTTP through Hub1 Application Gateway ($($script:ResolvedApiEndpoint); $($script:TransportReason))."
+        Assert-DirectApiHealth
+    } else {
+        Write-Warn "Selected transport: Azure VM Run Command ($($script:TransportReason))."
+        if (-not $ForceRunCommand) {
+            Write-Warn "Configure CIDR-restricted ingress to use direct HTTP."
+        }
+    }
 
     $nvaDns = az network lb frontend-ip show -g $ResourceGroup -n nva-frontend `
         --lb-name "$Prefix-hub1-nva-lb" --query privateIPAddress -o tsv
@@ -641,9 +837,15 @@ function Restore-Baseline {
     }
 
     $baselineCommand = Get-ApiCurlCommand -ScenarioLabel "baseline" -Profile "baseline"
-    Write-Info "Running the end-to-end transaction inside ${ApiVmName}:"
+    if ($script:UseDirectHttp) {
+        Write-Info "Running the end-to-end transaction through Hub1 Application Gateway:"
+    } else {
+        Write-Info "Running the end-to-end transaction inside ${ApiVmName}:"
+    }
     Write-Command $baselineCommand
-    Write-Info "The script transports this command with: az vm run-command invoke -g $ResourceGroup -n $ApiVmName ..."
+    if (-not $script:UseDirectHttp) {
+        Write-Info "The script transports this command with: az vm run-command invoke -g $ResourceGroup -n $ApiVmName ..."
+    }
     $baseline = Wait-ForTransactionState -Success $true -TimeoutMinutes $BaselineTimeoutMinutes `
         -ScenarioLabel "baseline" -Profile "baseline"
     if (-not $baseline) { throw "The telemetry API did not reach a healthy baseline." }
@@ -700,7 +902,11 @@ if ($ScenarioConfig.Fault) {
 try {
     Banner "PHASE 2 - WATCH THE SIGNAL CASCADE"
     $scenarioCommand = Get-ApiCurlCommand -ScenarioLabel $Scenario -Profile $ScenarioConfig.Profile
-    Write-Info "Running the exact scenario transaction inside ${ApiVmName}:"
+    if ($script:UseDirectHttp) {
+        Write-Info "Running the exact scenario transaction through Hub1 Application Gateway:"
+    } else {
+        Write-Info "Running the exact scenario transaction inside ${ApiVmName}:"
+    }
     Write-Command $scenarioCommand
     Write-Info "Waiting for the expected profile result while unaffected checks remain visible..."
     $scenarioResult = Wait-ForScenarioResult -TimeoutMinutes 8

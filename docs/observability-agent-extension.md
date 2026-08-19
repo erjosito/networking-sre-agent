@@ -67,6 +67,8 @@ part.
 
 - `<prefix>-observability-api-ai`: workspace-based Application Insights.
 - `<prefix>-observability-api`: Ubuntu VM in the spoke11 default subnet.
+- Optional, post-deployment public ingress on the existing Hub1 Application Gateway:
+  presenter -> CIDR-restricted frontend port 8080 -> API private IP port 8080.
 - `<prefix>-network-transaction-api`: Flask API instrumented with the Azure Monitor
   OpenTelemetry distribution.
 - A synthetic transaction every 15 seconds checking:
@@ -94,6 +96,37 @@ optional on-prem server exists.
 .\scripts\deploy-onprem.ps1 -Stage all
 .\scripts\deploy-observability.ps1 -ObservabilityLocation canadacentral
 ```
+
+The deployment does **not** expose the API publicly by default. To enable direct
+presenter access after deployment, allow only the presenter's current public IPv4
+address:
+
+```powershell
+.\scripts\configure-observability-appgw.ps1 `
+  -AllowedSourceCidr '<presenter-public-ip>/32'
+```
+
+Alternatively, configure it as part of the extension deployment:
+
+```powershell
+.\scripts\deploy-observability.ps1 `
+  -ObservabilityLocation canadacentral `
+  -AppGatewayAllowedSourceCidr '<presenter-public-ip>/32'
+```
+
+This creates distinct `observability-api-*` objects only on Hub1 AppGW and an NSG
+rule on `<prefix>-hub1-appgw-nsg` that permits the selected frontend port only from
+the supplied CIDR. It never opens API port 8080 to `Internet` or `0.0.0.0/0`.
+AppGW-to-API traffic remains internal and follows the existing RFC1918 route through
+the NVA, preserving the lab's symmetric routing. Disable the optional ingress with:
+
+```powershell
+.\scripts\configure-observability-appgw.ps1 -Disable
+```
+
+The listener uses HTTP only because this lab sends no credentials or payload
+secrets. Production ingress should use HTTPS with a managed certificate and a
+suitable TLS policy; this lab does not invent or provision a certificate.
 
 The base lab can remain in `eastus2`; the Observability Agent and its Azure Monitor
 workspace use a separate supported autonomous-operations region.
@@ -124,6 +157,13 @@ Missing delayed telemetry, alerts, or a preview agent-created issue are warnings
 after cleanup unless `-StrictVerification` is set; scenario behavior or recovery
 failures still exit nonzero.
 
+When the dedicated Hub1 listener exists, the demo discovers its frontend port and
+public IP/FQDN, verifies `/healthz`, and uses direct native HTTP for transactions.
+If the listener exists but is unhealthy, preflight fails with AppGW backend-health
+guidance rather than hiding the problem. When ingress is absent, the existing Azure
+VM Run Command transport remains the nonbreaking fallback. Use `-ApiEndpoint` to
+override discovery or `-ForceRunCommand` to deliberately select the fallback.
+
 | Scenario | Command | Expected boundary | Infrastructure mutation |
 |---|---|---|---|
 | DNS split-brain (default) | `.\scripts\demo-observability.ps1 -Scenario dns-split-brain` | `private_endpoint_dns` fails; cross-hub and other dependencies stay healthy | Yes; `pe-dns-override`, always reverted unless `-NoRevert` |
@@ -143,18 +183,24 @@ Presenter options can be combined:
 | `-Interactive` | Pauses before fault injection and recovery without printing the detailed hints. |
 | `-Timeline` | Prints relative timestamps for the observed signal cascade. |
 | `-PreflightOnly` | Restores and verifies the baseline after starting and waiting for the Observability API VM and both lab Application Gateways. |
+| `-ApiEndpoint` | Overrides the discovered AppGW base URL and requires its `/healthz` path to pass. |
+| `-ForceRunCommand` | Deliberately uses the legacy VM Run Command transport even when ingress exists. |
 | `-StrictVerification` | Also exits nonzero when telemetry, alerts, or issue creation are not observed. Useful for automated validation. |
 
-At each transaction stage, the script prints the exact command executed inside the
-private API VM and displays its JSON body plus HTTP status:
+At each transaction stage, the script prints the equivalent curl command and
+displays its JSON body plus HTTP status, including structured HTTP 503 responses.
+With direct ingress selected the URL is the Hub1 AppGW endpoint:
 
 ```bash
 curl --silent --show-error --max-time 30 \
   --header 'X-Lab-Scenario: dependency-latency' \
   --header 'X-Lab-Profile: dependency-latency' \
   --write-out '\nHTTP_STATUS=%{http_code}\n' \
-  http://127.0.0.1:8080/api/transaction
+  http://<hub1-appgw-fqdn>:8080/api/transaction
 ```
+
+Without optional ingress, the same output shows `http://127.0.0.1:8080` and the
+script transports the command through `az vm run-command`.
 
 For a fully guided recording that also opens the relevant resources:
 

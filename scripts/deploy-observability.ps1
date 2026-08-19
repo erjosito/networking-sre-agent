@@ -12,6 +12,11 @@
     The Observability Agent and its Azure Monitor workspace are deployed in a
     region that supports autonomous operations. They can differ from the base
     lab region.
+
+.PARAMETER AppGatewayAllowedSourceCidr
+    Optional presenter public IPv4 address or CIDR. When supplied, configure the
+    existing Hub1 Application Gateway for direct HTTP access after deployment.
+    When omitted, no public API ingress is created.
 #>
 
 [CmdletBinding()]
@@ -30,11 +35,17 @@ param(
     [int]$DependencyLatencyAlertThresholdMs = 2000,
     [string]$SshKeyPath = $env:SSH_KEY_PATH ?? "$HOME/.ssh/id_rsa.pub",
     [string]$AdminUsername = $env:ADMIN_USERNAME ?? "azureuser",
+    [ValidatePattern('^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:/(?:[0-9]|[12]\d|3[0-2]))?$')]
+    [string]$AppGatewayAllowedSourceCidr,
     [SecureString]$AdminPassword
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($AppGatewayAllowedSourceCidr -match '/0$') {
+    throw "AppGatewayAllowedSourceCidr cannot use a /0 prefix. Supply the presenter's public IPv4 address, normally as a /32."
+}
 
 function Write-Info { param([string]$Message) Write-Host "[INFO]  $Message" -ForegroundColor Green }
 function Write-Warn { param([string]$Message) Write-Host "[WARN]  $Message" -ForegroundColor Yellow }
@@ -43,6 +54,7 @@ function Write-Err { param([string]$Message) Write-Host "[ERROR] $Message" -Fore
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoDir = Split-Path -Parent $ScriptDir
 $TemplateFile = Join-Path $RepoDir "infra" "modules" "observability-workload.bicep"
+$AppGatewayScript = Join-Path $ScriptDir "configure-observability-appgw.ps1"
 
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     Write-Err "Azure CLI (az) is not installed. See https://aka.ms/install-azure-cli"
@@ -187,12 +199,34 @@ if ($LASTEXITCODE -ne 0 -or ($VerifyResult -join "`n") -notmatch '"status":"ok"'
 }
 Write-Info "Telemetry API and synthetic traffic service are healthy."
 
+$AppGatewayEndpoint = ""
+if ($AppGatewayAllowedSourceCidr) {
+    if (-not (Test-Path $AppGatewayScript)) {
+        throw "Application Gateway configuration script not found at $AppGatewayScript"
+    }
+    Write-Info "Configuring CIDR-restricted Hub1 Application Gateway ingress..."
+    $AppGatewayEndpoint = @(& $AppGatewayScript `
+        -ResourceGroup $ResourceGroup `
+        -Prefix $Prefix `
+        -AllowedSourceCidr $AppGatewayAllowedSourceCidr) | Select-Object -Last 1
+    if (-not $AppGatewayEndpoint) {
+        throw "Application Gateway ingress configuration did not return an endpoint."
+    }
+} else {
+    Write-Warn "Public ingress was not configured. The demo will fall back to Azure VM Run Command."
+    Write-Warn "Enable direct HTTP later with:"
+    Write-Host "  .\scripts\configure-observability-appgw.ps1 -ResourceGroup `"$ResourceGroup`" -Prefix `"$Prefix`" -AllowedSourceCidr '<presenter-public-ip>/32'"
+}
+
 Write-Host ""
 Write-Info "=== Observability extension deployed ==="
 Write-Host "  API VM              : $($Outputs.apiVmName.value) ($($Outputs.apiPrivateIp.value):8080)"
 Write-Host "  Application Insights: $($Outputs.applicationInsightsName.value)"
 Write-Host "  Observability Agent : $($Outputs.observabilityAgentName.value)"
 Write-Host "  Agent region        : $ObservabilityLocation"
+if ($AppGatewayEndpoint) {
+    Write-Host "  Public API endpoint : $AppGatewayEndpoint"
+}
 Write-Host ""
 Write-Info "The API emits a synthetic transaction every 15 seconds."
 Write-Info "The opt-in dependency-latency profile delays '$DependencyLatencyTarget' by ${DependencyLatencyMs}ms."

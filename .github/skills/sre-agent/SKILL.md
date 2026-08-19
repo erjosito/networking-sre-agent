@@ -15,6 +15,7 @@ infra/main.bicep              — Top-level Bicep orchestration
 infra/modules/*.bicep         — Individual modules (hub, spoke, onprem, vpn-connections, private-link, appgw, traffic-manager, connection-monitors, alerts, sre-agent)
 scripts/deploy.ps1            — Full deployment + post-deploy config
 scripts/deploy-observability.ps1 — Optional OpenTelemetry API + Observability Agent extension
+scripts/configure-observability-appgw.ps1 — Optional CIDR-restricted Hub1 AppGW ingress
 scripts/demo-observability.ps1 — Recording-oriented DNS split-brain Observability Agent demo
 scripts/check-health.ps1      — 20-section environment validation
 scripts/inject-fault.ps1      — 33 fault scenarios across 7 categories (incl. 7 containerlab on-prem faults)
@@ -59,6 +60,32 @@ OpenTelemetry API in spoke11, continuous synthetic dependency traffic, applicati
 alerts, an Azure Monitor workspace, and a
 `Microsoft.Monitor/observabilityAgents` resource. It is independent of
 `main.bicep`, so it can be added without recreating the base lab.
+
+Public API ingress is disabled by default. For a presenter, add the dedicated Hub1
+AppGW listener and allow only the presenter's public IPv4 CIDR:
+
+```powershell
+.\scripts\configure-observability-appgw.ps1 `
+  -AllowedSourceCidr '<presenter-public-ip>/32'
+```
+
+The script is idempotent and configures only `observability-api-*` AppGW objects plus
+one rule on `<prefix>-hub1-appgw-nsg`. Never widen that rule to `Internet` or
+`0.0.0.0/0`. The public frontend is HTTP port 8080; the backend remains the API VM's
+private IP port 8080 and follows the existing AppGW -> NVA -> spoke path. HTTP is
+acceptable only for this lab because transactions contain no credentials or payload
+secrets; production requires HTTPS and a managed certificate. Use `-Disable` to
+remove the optional objects.
+
+`demo-observability.ps1` discovers and verifies this listener, then prefers direct
+native HTTP while preserving structured 503 responses. It falls back to VM Run
+Command only when ingress is absent or `-ForceRunCommand` is specified. A discovered
+but unhealthy ingress is a preflight failure; inspect it with:
+
+```powershell
+az network application-gateway show-backend-health `
+  -g netsre-rg -n netsre-hub1-appgw -o jsonc
+```
 
 ### Deploy individual modules (when full redeploy fails)
 

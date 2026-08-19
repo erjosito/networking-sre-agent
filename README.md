@@ -46,9 +46,11 @@ It exists to answer three questions end-to-end:
    investigate, and (in Autonomous mode) remediate it.
 4. **Optionally add application observability** with
    `scripts/deploy-observability.ps1`.
-5. **Run the Observability Agent demo** with
+5. **Optionally enable CIDR-restricted direct ingress** with
+   `scripts/configure-observability-appgw.ps1`.
+6. **Run the Observability Agent demo** with
    `scripts/demo-observability.ps1 -PresenterMode -OpenPortal`.
-6. **Verify / tear down** with `scripts/check-health.ps1` and `scripts/teardown.ps1`.
+7. **Verify / tear down** with `scripts/check-health.ps1` and `scripts/teardown.ps1`.
 
 ## Relationship to Microsoft's Azure Copilot MicroHack
 
@@ -300,6 +302,16 @@ az login
 
 # 7. Run specific health check sections
 .\scripts\check-health.ps1 -Sections 1,5,20
+
+# 8. Optional: deploy application observability without public ingress
+.\scripts\deploy-observability.ps1 -ObservabilityLocation canadacentral
+
+# 9. Optional: allow only this presenter's public IPv4 address through Hub1 AppGW
+.\scripts\configure-observability-appgw.ps1 `
+  -AllowedSourceCidr '<presenter-public-ip>/32'
+
+# 10. The demo prefers direct HTTP when ingress exists; otherwise it uses Run Command
+.\scripts\demo-observability.ps1 -PresenterMode
 ```
 
 The deployment script automatically:
@@ -307,6 +319,15 @@ The deployment script automatically:
 2. Enables the Storage Account static website
 3. Uploads `index.html` for HTTP probes
 4. Deploys connection monitors to `NetworkWatcherRG`
+
+The optional Observability ingress is deliberately post-deployment and does not
+change the base AppGW Bicep. It never allows port 8080 from all Internet sources:
+the Hub1 AppGW subnet NSG accepts only the supplied presenter CIDR, and backend
+traffic remains private through the NVA. HTTP is acceptable only for this lab's
+credential-free requests; production should use HTTPS with a managed certificate.
+If the dedicated listener is absent, the demo retains its existing `az vm
+run-command` fallback. If the listener exists but `/healthz` fails, preflight stops
+instead of silently masking the broken ingress.
 
 ---
 
