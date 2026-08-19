@@ -87,7 +87,7 @@ if ($List) {
         @{ Name = "pe-nsg-block";                Category = "Private Link"; Description = "Add NSG deny rule blocking traffic to the PE subnet (10.1.4.0/24)" }
         @{ Name = "pe-dns-break";                Category = "Private Link"; Description = "Stop dnsmasq on Hub1 NVA, breaking PE DNS resolution from on-prem" }
         @{ Name = "pe-route-missing";            Category = "Private Link"; Description = "Remove PE subnet UDR from spoke11 route table (traffic bypasses NVA)" }
-        @{ Name = "pe-dns-override";            Category = "Private Link"; Description = "Set spoke VNet DNS to Azure default and reboot VM — PE FQDN resolves to public IP while all other connectivity stays healthy" }
+        @{ Name = "pe-dns-override";            Category = "Private Link"; Description = "Set spoke VNet DNS to Azure default and reboot spoke workloads — PE FQDN resolves to public IP while all other connectivity stays healthy" }
         @{ Name = "appgw-probe-misconfigure";   Category = "AppGW";        Description = "Set AppGW health probe host to 127.0.0.1 (backends become Unhealthy)" }
         @{ Name = "clab-ospf-area-mismatch";    Category = "Containerlab"; Description = "OSPF area mismatch on r1 transit (area 0->1) — adjacency drops, peer loopback withdrawn; because BGP peers over the loopbacks this tears down the BGP session and withdraws the LAN — clab CM FAILS + bgpd syslog" }
         @{ Name = "clab-ospf-mtu-mismatch";     Category = "Containerlab"; Description = "OSPF interface MTU mismatch on r1 eth1 (1500->1400) — adjacency stuck in ExStart/Exchange, peer loopback never learned; BGP-over-loopback session drops — clab CM FAILS + bgpd syslog" }
@@ -665,7 +665,7 @@ function Invoke-PeRouteMissing {
         Write-Info "Re-adding PE subnet route to spoke11 route table"
         az network route-table route create -g $ResourceGroup --route-table-name $rtName `
             -n to-pe-subnet --address-prefix 10.1.4.0/24 `
-            --next-hop-type VirtualAppliance --next-hop-ip-address (Get-NvaLbIp) -o none
+            --next-hop-type VirtualAppliance --next-hop-ip-address (Get-LbFrontendIp) -o none
         Write-Ok "PE subnet route restored on spoke11 route table"
     } else {
         Write-Info "Removing PE subnet UDR from spoke11 route table"
@@ -680,25 +680,39 @@ function Invoke-PeRouteMissing {
 function Invoke-PeDnsOverride {
     $spokeVnet = "${Prefix}-spoke11-vnet"
     $vmName = "${Prefix}-spoke11-vm"
+    $observabilityVmName = "${Prefix}-observability-api"
+    $vmNames = @($vmName)
+    $observabilityVm = az vm show -g $ResourceGroup -n $observabilityVmName --query name -o tsv 2>$null
+    if ($observabilityVm) {
+        $vmNames += $observabilityVmName
+    }
     if ($Revert) {
         Write-Info "Restoring custom DNS server on spoke11 VNet to NVA LB"
-        $nvaLbIp = Get-NvaLbIp
+        $nvaLbIp = Get-LbFrontendIp
         az network vnet update -g $ResourceGroup -n $spokeVnet --dns-servers $nvaLbIp -o none
+        if ($LASTEXITCODE -ne 0) { throw "Failed to restore spoke11 VNet DNS." }
         Write-Ok "Spoke11 VNet DNS restored to NVA LB ($nvaLbIp)"
-        Write-Info "Restarting $vmName to pick up restored DNS configuration..."
-        az vm restart -g $ResourceGroup -n $vmName -o none
-        Write-Ok "$vmName restarted — will use NVA as DNS server again"
+        foreach ($workloadVm in $vmNames) {
+            Write-Info "Restarting $workloadVm to pick up restored DNS configuration..."
+            az vm restart -g $ResourceGroup -n $workloadVm -o none
+            if ($LASTEXITCODE -ne 0) { throw "Failed to restart $workloadVm." }
+            Write-Ok "$workloadVm restarted — will use NVA as DNS server again"
+        }
     } else {
         Write-Info "Setting spoke11 VNet DNS to Azure default (removing custom DNS server)"
         Write-Info "REASON: Without custom DNS pointing to NVA/dnsmasq, the spoke resolves PE FQDNs via Azure DNS"
         Write-Info "        but has no Private DNS Zone link, so it gets the public IP instead of the private endpoint IP."
         Write-Info "        This is a subtle misconfiguration: all other connectivity works, only PE resolution breaks."
-        az network vnet update -g $ResourceGroup -n $spokeVnet --dns-servers "" -o none
+        az network vnet update -g $ResourceGroup -n $spokeVnet --dns-servers null -o none
+        if ($LASTEXITCODE -ne 0) { throw "Failed to set spoke11 VNet DNS to Azure default." }
         Write-Ok "Spoke11 VNet DNS set to Azure default"
-        Write-Info "Restarting $vmName to force DHCP lease renewal with new DNS settings..."
-        az vm restart -g $ResourceGroup -n $vmName -o none
-        Write-Ok "$vmName restarted — DNS change is now active"
-        Write-Impact "Spoke11 VM resolves storage account FQDN to public IP instead of PE private IP."
+        foreach ($workloadVm in $vmNames) {
+            Write-Info "Restarting $workloadVm to force DHCP lease renewal with new DNS settings..."
+            az vm restart -g $ResourceGroup -n $workloadVm -o none
+            if ($LASTEXITCODE -ne 0) { throw "Failed to restart $workloadVm." }
+            Write-Ok "$workloadVm restarted — DNS change is now active"
+        }
+        Write-Impact "Spoke11 workloads resolve storage account FQDN to public IP instead of PE private IP."
         Write-Impact "Connection Monitor spoke11-to-staticweb will FAIL (HTTP probe gets wrong backend)."
         Write-Impact "All other spoke11 connectivity (cross-spoke, on-prem, internet) remains HEALTHY."
     }

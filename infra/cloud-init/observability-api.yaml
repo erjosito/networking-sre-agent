@@ -1,0 +1,85 @@
+#cloud-config
+package_update: true
+packages:
+  - python3-venv
+  - curl
+  - dnsutils
+
+write_files:
+  - path: /opt/netsre-observability/app.py
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: APP_PY_BASE64_PLACEHOLDER
+
+  - path: /opt/netsre-observability/requirements.txt
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: REQUIREMENTS_BASE64_PLACEHOLDER
+
+  - path: /etc/netsre-observability.env
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: ENV_BASE64_PLACEHOLDER
+
+  - path: /etc/systemd/system/netsre-observability-api.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Networking SRE telemetry-enabled API
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/netsre-observability.env
+      WorkingDirectory=/opt/netsre-observability
+      ExecStart=/opt/netsre-observability/venv/bin/gunicorn --workers 2 --bind 0.0.0.0:8080 --access-logfile - app:app
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/netsre-synthetic-traffic.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -u
+      while true; do
+        curl --silent --show-error --max-time 30 \
+          --header 'X-Lab-Scenario: baseline' \
+          --header 'X-Lab-Profile: baseline' \
+          http://127.0.0.1:8080/api/transaction >/dev/null || true
+        sleep 15
+      done
+
+  - path: /etc/systemd/system/netsre-synthetic-traffic.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Networking SRE synthetic transaction generator
+      After=netsre-observability-api.service
+      Requires=netsre-observability-api.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/netsre-synthetic-traffic.sh
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - python3 -m venv /opt/netsre-observability/venv
+  - /opt/netsre-observability/venv/bin/pip install --upgrade pip
+  - /opt/netsre-observability/venv/bin/pip install --requirement /opt/netsre-observability/requirements.txt
+  - systemctl daemon-reload
+  - systemctl enable --now netsre-observability-api
+  - systemctl enable --now netsre-synthetic-traffic

@@ -14,6 +14,8 @@ This skill provides operational knowledge for the networking-sre-agent repositor
 infra/main.bicep              — Top-level Bicep orchestration
 infra/modules/*.bicep         — Individual modules (hub, spoke, onprem, vpn-connections, private-link, appgw, traffic-manager, connection-monitors, alerts, sre-agent)
 scripts/deploy.ps1            — Full deployment + post-deploy config
+scripts/deploy-observability.ps1 — Optional OpenTelemetry API + Observability Agent extension
+scripts/demo-observability.ps1 — Recording-oriented DNS split-brain Observability Agent demo
 scripts/check-health.ps1      — 20-section environment validation
 scripts/inject-fault.ps1      — 33 fault scenarios across 7 categories (incl. 7 containerlab on-prem faults)
 scripts/upload-knowledge.ps1  — Print manual knowledge-upload instructions (portal; superseded by configure-sre-agent.ps1 -Apply)
@@ -45,6 +47,18 @@ Deployment takes ~30-45 minutes (VPN Gateways are the bottleneck). The script:
 - `vpnSharedKey` — required by `main.bicep` (no default). `deploy.ps1` defaults it to `TestVpnKey2025!`.
 - SRE Agent: no sponsor group / agent identity required. The agent is deployed with a **SystemAssigned + UserAssigned** identity and **no** `properties.agentIdentity` block — this avoids the per-tenant "not allowed to create agent identities" gate. `-SreAgentSponsorGroupId` is deprecated/ignored; skip the agent with `-DeploySreAgent $false`. Verified working in eastus2 and canadacentral.
 - For long/unattended runs, submit with `--no-wait` so the deployment survives a disconnected shell, then poll `az deployment group list`/`... wait`. 0 registered deployments after a submit = a client-side parameter error, not a slow ARM.
+
+### Deploy the Observability Agent extension
+
+```powershell
+.\scripts\deploy-observability.ps1 -ObservabilityLocation canadacentral
+```
+
+This optional add-on deploys a workload-specific Application Insights resource, an
+OpenTelemetry API in spoke11, continuous synthetic dependency traffic, application
+alerts, an Azure Monitor workspace, and a
+`Microsoft.Monitor/observabilityAgents` resource. It is independent of
+`main.bicep`, so it can be added without recreating the base lab.
 
 ### Deploy individual modules (when full redeploy fails)
 

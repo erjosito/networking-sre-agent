@@ -49,6 +49,14 @@
     timeline summary table at the end. Great for rehearsals to learn the real
     latencies between links in the chain.
 
+.PARAMETER ContextualTroubleshooting
+    Before fault injection, print an optional Azure portal resource-picker step and
+    an exact contextual troubleshooting prompt for the curated scenario.
+
+.PARAMETER SupportEscalation
+    Print a case-ready support escalation package before cleanup. Use when proposed
+    remediation is unsafe, unavailable, withheld, or unsuccessful.
+
 .PARAMETER TimeoutMinutes
     How long to watch the investigation (default 30).
 
@@ -69,6 +77,7 @@
     .\demo.ps1 -Scenario clab -Interactive
     .\demo.ps1 -Scenario clab -Timeline          # rehearsal: learn the cascade timings
     .\demo.ps1 -Scenario azure -TimeoutMinutes 25
+    .\demo.ps1 -Scenario azure -ContextualTroubleshooting -SupportEscalation
     .\demo.ps1 -Scenario clab -PreflightOnly     # just make the lab clean
 #>
 
@@ -79,6 +88,8 @@ param(
     [string]$FaultName = "",
     [switch]$Interactive,
     [switch]$Timeline,
+    [switch]$ContextualTroubleshooting,
+    [switch]$SupportEscalation,
     [int]$TimeoutMinutes = 30,
     [int]$BaselineTimeoutMinutes = 15,
     [switch]$PreflightOnly,
@@ -450,6 +461,18 @@ $curated = @{
         Syslog    = @()                   # UDR fault produces no syslog
         Story  = "Spoke11's default route (0.0.0.0/0 → NVA) is repointed to an unreachable next-hop (10.255.255.1). Traffic black-holes; every resource still reports healthy. Spoke11 Connection Monitors fail → Azure Monitor alert → the agent must trace effective routes to the bad UDR."
         Expect = "Watch for: incident on 'netsre-cm-checks-failed'; the agent pulls effective routes / route tables and localizes the black-hole to the spoke11 UDR next-hop."
+        Impact = "User transactions sourced from spoke11 cannot reach dependencies that rely on the default route; unrelated spokes may remain healthy."
+        ResourcePicker = "$Prefix-spoke11-vnet or $Prefix-spoke11-rt"
+        Diagnostics = @(
+            "az network nic show-effective-route-table -g $ResourceGroup -n ${Prefix}-spoke11-vm-nic -o table"
+            "az network route-table route list -g $ResourceGroup --route-table-name ${Prefix}-spoke11-rt -o table"
+            ".\scripts\check-health.ps1 -Sections 5,6"
+        )
+        Hypotheses = @(
+            "NSG or guest firewall denial on the affected flow"
+            "NVA IP-forwarding or health-probe failure"
+            "Peering or VPN transit failure outside spoke11"
+        )
     }
     clab = @{
         Fault     = 'clab-ospf-area-mismatch'
@@ -459,12 +482,81 @@ $curated = @{
         Syslog    = @('ADJCHANGE','Nbr','neighbor','OSPF')  # FRR bgpd/ospfd messages
         Story  = "On the on-prem fabric, r1's transit OSPF area is flipped (0 → 1). The adjacency drops, r2's loopback is withdrawn, the BGP session (which peers over the loopbacks) tears down, the LAN 172.31.20.0/24 is withdrawn — the clab Connection Monitor fails and bgpd logs to syslog."
         Expect = "Watch for: incident on 'netsre-clab-cm-*'; the agent follows the on-prem-fabric-triage skill, docker-execs into the FRR routers, checks OSPF FIRST, and roots the cause at the OSPF area mismatch (not the downstream BGP symptom)."
+        Impact = "Azure-to-on-prem user traffic cannot reach the containerlab LAN while Azure-only paths may remain healthy."
+        ResourcePicker = "$Prefix-onprem-clab virtual machine"
+        Diagnostics = @(
+            "az vm run-command invoke -g $ResourceGroup -n ${Prefix}-onprem-clab --command-id RunShellScript --scripts `"docker exec clab-onprem-onprem-r1 vtysh -c 'show ip ospf neighbor'`""
+            "az vm run-command invoke -g $ResourceGroup -n ${Prefix}-onprem-clab --command-id RunShellScript --scripts `"docker exec clab-onprem-onprem-r1 vtysh -c 'show bgp ipv4 unicast summary'`""
+            ".\scripts\check-health.ps1 -Sections 9"
+        )
+        Hypotheses = @(
+            "BGP policy or session failure independent of OSPF"
+            "Containerlab host-veth probe path bypass or loss"
+            "Azure VPN or GatewaySubnet routing failure"
+        )
     }
 }
 
 $fault = if ($FaultName) { $FaultName } else { $curated[$Scenario].Fault }
 $titleFilter = if ($FaultName) { '' } else { $curated[$Scenario].Title }
 $meta = $curated[$Scenario]
+if ($FaultName) {
+    $meta = $meta.Clone()
+    $meta.Story = "Custom fault scenario '$FaultName' produced the observed connectivity incident."
+    $meta.Impact = "Connectivity impact depends on the selected fault; preserve the observed affected and healthy paths in the case."
+    $meta.ResourcePicker = "$ResourceGroup resource group"
+    $meta.Diagnostics = @(
+        ".\scripts\check-health.ps1"
+        ".\scripts\inject-fault.ps1 -Scenario $FaultName -Revert"
+        "az monitor metrics alert list -g $ResourceGroup -o table"
+    )
+    $meta.Hypotheses = @(
+        "The configured fault did not affect the intended data path"
+        "An unrelated baseline failure contributed to the symptoms"
+        "The alert and incident were correlated from different time windows"
+    )
+}
+
+function Show-ContextualTroubleshootingStep {
+    param($Metadata)
+    Banner "OPTIONAL PRESENTER STEP - PORTAL CONTEXTUAL TROUBLESHOOTING"
+    Write-Host "  Portal: Azure SRE Agent -> Troubleshoot -> Add resource -> $($Metadata.ResourcePicker)" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Exact prompt:" -ForegroundColor Yellow
+    Write-Host "  Investigate connectivity for the selected resource in $ResourceGroup. Establish the current healthy baseline, identify affected and healthy paths, inspect topology and recent changes, and rank likely causes with evidence. Do not remediate yet; return the diagnostics you would run and the rollback-safe next action." -ForegroundColor White
+    Write-Host ""
+    Write-Info "This presenter branch starts from resource context; the autonomous workflow below still starts from the alert."
+}
+
+function Show-SupportEscalationPackage {
+    param($Metadata, [string]$Reason)
+    Banner "SUPPORT ESCALATION PACKAGE"
+    Write-Host "Reason" -ForegroundColor Yellow
+    Write-Host "  $Reason"
+    Write-Host "Symptoms" -ForegroundColor Yellow
+    Write-Host "  $($Metadata.Story)"
+    Write-Host "Business impact" -ForegroundColor Yellow
+    Write-Host "  $($Metadata.Impact)"
+    Write-Host "Evidence and signals" -ForegroundColor Yellow
+    if ($script:Events.Count -eq 0) {
+        Write-Host "  No timeline events were captured; collect current Connection Monitor, alert, and incident state."
+    } else {
+        foreach ($event in ($script:Events | Sort-Object Time)) {
+            $detail = if ($event.Detail) { " - $($event.Detail)" } else { "" }
+            Write-Host "  $($event.Time.ToString('o')) $($event.Label)$detail"
+        }
+    }
+    Write-Host "Diagnostics and exact commands" -ForegroundColor Yellow
+    foreach ($command in $Metadata.Diagnostics) {
+        Write-Host "  $command"
+    }
+    Write-Host "Remaining hypotheses" -ForegroundColor Yellow
+    foreach ($hypothesis in $Metadata.Hypotheses) {
+        Write-Host "  - $hypothesis"
+    }
+    Write-Host "Requested support outcome" -ForegroundColor Yellow
+    Write-Host "  Validate the localized layer, identify a rollback-safe remediation, and state the post-change connectivity test."
+}
 
 Banner "SRE AGENT LIVE DEMO  —  scenario: $Scenario  (fault: $fault)"
 if (-not $FaultName) {
@@ -495,6 +587,11 @@ if ($PreflightOnly) {
     Show-Timeline
     Banner "PRE-FLIGHT ONLY — lab is clean and warm. Re-run without -PreflightOnly to inject and record."
     return
+}
+
+if ($ContextualTroubleshooting) {
+    Show-ContextualTroubleshootingStep -Metadata $meta
+    Pause-Step "continue from contextual troubleshooting to the autonomous alert workflow"
 }
 
 # ── 1. Inject the fault (T0) ────────────────────────────────────────────────
@@ -571,16 +668,31 @@ if (-not $NoWatch) {
     Write-Warn "NoWatch set — skipping the live investigation stream."
 }
 
+# Refresh the observable remediation state before deciding whether escalation is
+# needed. Non-timeline runs do not otherwise set AgentReverted during the watch.
+if (-not $script:AgentReverted) {
+    $rr = @(Get-CmResults -SourceName $meta.CmSource -Mins 10)
+    if ($rr.Count -gt 0 -and @($rr | Where-Object { $_.TestResult -ne 'Pass' }).Count -eq 0) {
+        $script:AgentReverted = $true
+    }
+}
+
+if ($SupportEscalation) {
+    $escalationReason = if ($NoWatch) {
+        "Autonomous investigation or remediation was not observed in this run."
+    } elseif ($script:AgentReverted) {
+        "Escalation was requested after automated recovery; use the package for follow-up and recurrence prevention."
+    } else {
+        "No safe and successful autonomous remediation was observed before presenter cleanup."
+    }
+    Show-SupportEscalationPackage -Metadata $meta -Reason $escalationReason
+}
+
 # ── 3. Revert ───────────────────────────────────────────────────────────────
 # Before touching anything, verify whether the SRE Agent already remediated the
 # fault on its own — the scenario's Connection Monitor being GREEN again is the
 # observable signal. If so, there is nothing to revert (a manual revert would be
 # a no-op) and we tell the user rather than blindly re-applying.
-if (-not $script:AgentReverted) {
-    $rr = @(Get-CmResults -SourceName $meta.CmSource -Mins 10)
-    if ($rr.Count -gt 0 -and @($rr | Where-Object { $_.TestResult -ne 'Pass' }).Count -eq 0) { $script:AgentReverted = $true }
-}
-
 if ($NoRevert) {
     Write-Warn "NoRevert set — fault '$fault' will NOT be reverted by this script."
     if ($script:AgentReverted) { Write-Ok "Note: the SRE Agent already restored connectivity (CM green)." }

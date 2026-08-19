@@ -103,7 +103,9 @@ rehearsal. Useful switches: `-Timeline` (timestamp every action **and** watch fo
 event — see §3), `-PreflightOnly` (run pre-flight and stop — warm/verify the lab),
 `-TimeoutMinutes 30` (how long to watch), `-BaselineTimeoutMinutes 15` (how long pre-flight waits
 for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-NoWatch`,
-`-FaultName <any inject-fault scenario>`. Pre-flight always runs — there is no skip switch.
+`-FaultName <any inject-fault scenario>`, `-ContextualTroubleshooting` (show the
+portal resource-picker branch before injection), and `-SupportEscalation` (print a
+case-ready package before cleanup). Pre-flight always runs — there is no skip switch.
 
 ### What each phase does (and what to say)
 
@@ -113,6 +115,34 @@ for CMs to go green), `-NoRevert` (leave the fault in for a follow-up shot), `-N
 | **1 · Inject** | `inject-fault.ps1 -Scenario <fault>` | *"Now I break exactly one thing. Notice every resource still reports healthy — this is the subtle kind of fault that takes an expert hours."* |
 | **2 · Watch** | `watch-incidents.ps1 -Quiet` — follows the investigation silently and prints only the **final message(s)** when the agent finishes, the incident resolves, or activity **stalls** for 3 min (with `-Timeline`, a cascade watcher runs first) | *"Rather than scroll every message, I let it work and show the conclusion. Within a couple of minutes the Connection Monitor fails, the metric alert fires, and the agent opens an incident — then it builds a plan, pulls telemetry, runs diagnostics, and reasons to the root cause."* |
 | **3 · Revert** | First checks whether the **agent already remediated** the fault (scenario Connection Monitor GREEN again). If so it says so and skips the manual revert (non-interactive) or asks whether to revert anyway (`-Interactive`); otherwise `inject-fault.ps1 … -Revert` | *"The script verifies whether the agent fixed it on its own before I touch anything — if connectivity is already restored there's nothing to revert; otherwise it restores the environment for the next take."* (`-NoRevert` leaves it as-is.) |
+
+### Optional portal-context branch
+
+`-ContextualTroubleshooting` pauses the presenter after the clean baseline and before
+the alert-driven autonomous workflow. It prints the relevant Azure portal resource
+picker and this exact prompt:
+
+> Investigate connectivity for the selected resource in the resource group.
+> Establish the current healthy baseline, identify affected and healthy paths,
+> inspect topology and recent changes, and rank likely causes with evidence. Do not
+> remediate yet; return the diagnostics you would run and the rollback-safe next
+> action.
+
+This demonstrates contextual troubleshooting without replacing the autonomous
+alert-to-incident path that follows.
+
+### Support escalation fallback
+
+Use `-SupportEscalation` when remediation is unsafe, absent, deliberately withheld,
+or unsuccessful. Before cleanup, the script prints a support-ready package with:
+
+- symptoms and business impact;
+- timestamped evidence and observed signals;
+- diagnostics already run and exact commands to reproduce them; and
+- remaining hypotheses plus the requested rollback-safe support outcome.
+
+The package is useful even when the presenter reverts the deterministic lab fault:
+it captures what would be handed to the platform or network owner in production.
 
 ---
 

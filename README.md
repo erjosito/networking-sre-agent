@@ -8,7 +8,7 @@ environment that (a) breaks in realistic ways and (b) emits the telemetry a real
 operator would use to diagnose it. This repo is that environment: a **deploy-it-
 yourself lab** plus everything the agent needs to reason about it.
 
-It exists to answer two questions end-to-end:
+It exists to answer three questions end-to-end:
 
 1. **Can an SRE Agent handle Azure networking incidents?** — a multi-hub hub-spoke
    topology, a catalogue of injectable faults, and the knowledge/skills that let the
@@ -17,6 +17,10 @@ It exists to answer two questions end-to-end:
    legacy protocols, telemetry arrives over syslog/SNMP/RADIUS, and the agent has no
    built-in knowledge of your fabric. We model a real on-prem router fabric, stream
    its telemetry into Azure Monitor, and teach the agent to triage it.
+3. **Where does the Azure Copilot Observability Agent add value?** — an optional
+   OpenTelemetry API turns network faults into requests, dependency failures, traces,
+   and correlated alerts so the Observability Agent can explain blast radius and
+   likely cause before the SRE Agent performs network-specific remediation.
 
 ## What it is
 
@@ -27,6 +31,9 @@ It exists to answer two questions end-to-end:
   networking, plus **custom sub-agents, skills, and incident response plans**.
 - **Fault-injection scripts** — 33 scenarios across 7 categories, including
   control-plane faults inside the on-prem Containerlab fabric.
+- **Optional Observability Agent extension** — Application Insights, a
+  telemetry-enabled synthetic transaction API, application alerts, autonomous issue
+  correlation, and deep investigations.
 - **Connection Monitors & alerts** — 11 test groups that trigger the agent
   automatically — and a **health-check script** (20 sections) for verification.
 
@@ -37,13 +44,30 @@ It exists to answer two questions end-to-end:
    knowledge, applies sub-agents + response plans.
 3. **Inject a fault** (`scripts/inject-fault.ps1`) and watch the agent detect,
    investigate, and (in Autonomous mode) remediate it.
-4. **Verify / tear down** with `scripts/check-health.ps1` and `scripts/teardown.ps1`.
+4. **Optionally add application observability** with
+   `scripts/deploy-observability.ps1`.
+5. **Run the Observability Agent demo** with
+   `scripts/demo-observability.ps1 -PresenterMode -OpenPortal`.
+6. **Verify / tear down** with `scripts/check-health.ps1` and `scripts/teardown.ps1`.
+
+## Relationship to Microsoft's Azure Copilot MicroHack
+
+Microsoft's
+[Azure Copilot MicroHack](https://github.com/microsoft/MicroHack/tree/main/03-Azure/01-03-Infrastructure/12_Azure_Copilot)
+is the better starting point for a broad, guided introduction to five Azure Copilot
+agents. This lab is complementary: it goes deeper on incident causality in a hybrid
+network, with reversible fault injection, real dependency telemetry, explicit blast
+radius evidence, configured agent knowledge and response plans, deterministic
+recovery checks, and an Observability-Agent-to-SRE-Agent handoff.
+
+Use the MicroHack to learn the agent portfolio; use this lab to rehearse a difficult
+network incident end to end and prove why a diagnosis is correct.
 
 ---
 
 ## 🗺️ How this project is organized
 
-The repo is one lab told in **two parts**. Start with the part you care about.
+The repo is one lab told in **three parts**. Start with the part you care about.
 
 ```mermaid
 flowchart TB
@@ -61,7 +85,11 @@ flowchart TB
     end
     A --> mon["Azure Monitor<br/>(logs · metrics · alerts)"]
     B --> mon
+    C["Part C · OpenTelemetry API<br/>Application Insights · dependency alerts"] --> mon
     mon --> agent{{"Azure SRE Agent"}}
+    mon --> obs{{"Observability Agent"}}
+    obs --> issues["Correlated issue<br/>blast radius · likely cause"]
+    issues -.network handoff.-> agent
     know["B2 · Knowledge + skills<br/>+ response plans"] -.teaches.-> agent
     agent --> loop["Detect → Investigate →<br/>Root cause → Fix"]
     loop -.remediate.-> A
@@ -71,6 +99,7 @@ flowchart TB
     classDef ext fill:#e9f7ef,stroke:#2e8b57;
     class A base
     class B ext
+    class C ext
 ```
 
 ### Part A — Azure Networking SRE *(the base story)*
@@ -141,6 +170,24 @@ your fabric. This part is covered by three concerns (read the
 > **Build order note:** although B1 (telemetry) is the *goal* that motivated the
 > extension, when deploying you provision in dependency order — **model the devices
 > (B3) → stream their telemetry (B1) → teach the agent (B2)**.
+
+### Part C — Observability Agent correlation and investigation
+
+The optional [Observability Agent extension](docs/observability-agent-extension.md)
+deploys an OpenTelemetry-instrumented API in spoke11. Its synthetic transactions
+exercise Private Endpoint DNS/HTTPS, cross-hub connectivity, and the optional
+on-prem server. This makes the same network faults visible as application requests,
+dependencies, traces, and alerts.
+
+Use the Observability Agent when the hard problem is correlating many symptoms,
+understanding blast radius, or ruling out competing causes. Use the SRE Agent when
+the problem is localized to networking and the valuable outcome is topology-aware
+diagnosis and remediation.
+
+The demo supports three safe profiles: DNS split-brain (the default reversible
+network fault), dependency-specific cross-hub latency, and an application-only
+exception after every dependency succeeds. Presenter prompts turn the correlated
+evidence into an exact SRE handoff and a verified user-transaction recovery.
 
 ---
 

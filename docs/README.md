@@ -4,7 +4,7 @@ Human-facing documentation for the Azure Networking SRE Agent testbed. (Agent-fa
 knowledge lives in [`../knowledge/`](../knowledge); the operational playbook for
 working in this repo is [`../.github/skills/sre-agent/SKILL.md`](../.github/skills/sre-agent/SKILL.md).)
 
-The project is one lab told in **two parts**. Start with the
+The project is one lab told in **three parts**. Start with the
 [repository README](../README.md) for the high-level *why / what / how-to-use*, then
 dive into the part you need.
 
@@ -13,6 +13,7 @@ flowchart TB
     root["📄 Repository README<br/>why · what · how to use"]
     root --> A["Part A — Azure Networking SRE"]
     root --> B["Part B — On-prem extension"]
+    root --> C["Part C — Observability Agent"]
 
     A --> acfg["sre-agent-configuration.md<br/>agent config & detection loop"]
 
@@ -20,11 +21,13 @@ flowchart TB
     B --> b1["B1 · onprem-telemetry-pipelines-how-it-works.md<br/>syslog · SNMP · RADIUS → Azure Monitor"]
     B --> b2["B2 · sre-agent-telemetry-and-actuation.md<br/>+ knowledge/ + onprem-fabric-triage skill"]
     B --> b3["B3 · containerlab-onprem-how-it-works.md<br/>modeled multi-router fabric"]
+    C --> c1["observability-agent-extension.md<br/>telemetry-enabled API · alert correlation · investigations"]
 
     classDef base fill:#e6f2ff,stroke:#0078d4;
     classDef ext fill:#e9f7ef,stroke:#2e8b57;
     class A,acfg base
     class B,rationale,b1,b2,b3 ext
+    class C,c1 ext
 ```
 
 ---
@@ -130,6 +133,7 @@ faults that cascade to a detectable Connection Monitor failure.*
 | [onprem-telemetry-pipelines-how-it-works](./onprem-telemetry-pipelines-how-it-works.md) | B1 | Implementation | How does telemetry actually reach Azure Monitor? |
 | [sre-agent-telemetry-and-actuation](./sre-agent-telemetry-and-actuation.md) | B2 | Concept / design | How does the agent read telemetry & act on devices? |
 | [containerlab-onprem-how-it-works](./containerlab-onprem-how-it-works.md) | B3 | Implementation | How is the multi-router fabric built & wired in? |
+| [observability-agent-extension](./observability-agent-extension.md) | C | Implementation | Which incidents favor the Observability Agent, and how is its telemetry workload deployed? |
 
 > **Build order note:** B1 (telemetry) is the *goal*, but you provision in dependency
 > order — **model the devices (B3) → stream their telemetry (B1) → teach the agent
@@ -137,10 +141,21 @@ faults that cascade to a detectable Connection Monitor failure.*
 
 ---
 
+## Part C — Azure Copilot Observability Agent
+
+- **[Observability Agent extension](./observability-agent-extension.md)** explains
+  where the Observability Agent is a better fit than the SRE Agent, how the two
+  agents form a correlation-to-remediation workflow, and how to deploy the
+  OpenTelemetry API and autonomous alert-correlation resources. Its runbook includes
+  DNS, dependency-latency, and application-exception profiles, alert-ID versus portal
+  context prompts, same-window issue correlation, and the exact SRE handoff.
+
+---
+
 ## Related material outside `docs/`
 
 - [`../README.md`](../README.md) — repository overview, quick start, fault catalogue,
-  and the Part A / Part B map.
+  and the Part A / Part B / Part C map.
 - [`../knowledge/`](../knowledge) — the full knowledge base uploaded to the agent.
 - [`../sre-agent-config/`](../sre-agent-config) — declarative agent config, custom
   sub-agents, skills, and response plans.
